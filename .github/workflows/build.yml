@@ -1,0 +1,130 @@
+name: Build
+
+# UserAtlas has two parts:
+#  - app/       The actual app. UserAtlas.exe fetches this folder from GitHub on
+#               every start, so a change here reaches everyone right after a push.
+#  - launcher/  UserAtlas.exe itself, packed into the installer UserAtlasSetup.exe.
+#               A new installer is only needed when the launcher changes.
+#
+# When:
+#  - every push and pull request: check the app and build the installer as a test
+#  - a tag like v1.2.0, or "Run workflow" with a version number:
+#    also publish the installer as a release on GitHub
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version number for a new installer release, e.g. 1.1.0 (empty = build only)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  VERSION_TAG: ${{ github.ref_type == 'tag' && github.ref_name || (inputs.version != '' && format('v{0}', inputs.version)) || '' }}
+
+jobs:
+  check-app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install packages
+        run: python -m pip install requests
+      - name: Check the code
+        run: |
+          python -m py_compile app/useratlas.py launcher/launcher.py
+          python -c "import json; d = json.load(open('app/info.json')); print('App version', d['version'], '| min launcher', d['min_launcher'])"
+          python app/useratlas.py --list
+
+  windows:
+    needs: check-app
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install packages
+        run: python -m pip install --upgrade pip requests pyinstaller
+
+      - name: Build UserAtlas.exe (the launcher)
+        run: >
+          pyinstaller --noconfirm --clean --onefile --windowed
+          --name UserAtlas
+          --icon app/useratlas.ico
+          launcher/launcher.py
+
+      - name: Check that everything is inside the .exe
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\UserAtlas.exe -ArgumentList "--selfcheck" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "UserAtlas.exe is missing parts (exit code $($p.ExitCode))" }
+          Write-Host "Self-check passed"
+
+      - name: Set up Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          if (-not (Test-Path $iscc)) { throw "Inno Setup not found" }
+          "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          $version = if ($env:VERSION_TAG) { $env:VERSION_TAG.TrimStart('v') } else { "0.0.0" }
+          & $env:ISCC "/DAppVersion=$version" installer\useratlas.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup reported an error" }
+          Get-Item dist\UserAtlasSetup.exe | Format-List Name, Length
+
+      - name: Test the installer (install, check, uninstall)
+        shell: pwsh
+        run: |
+          $setup = Start-Process -FilePath dist\UserAtlasSetup.exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait -PassThru
+          if ($setup.ExitCode -ne 0) { throw "Installing failed (exit code $($setup.ExitCode))" }
+          $exe = Join-Path $env:LOCALAPPDATA "Programs\UserAtlas\UserAtlas.exe"
+          if (-not (Test-Path $exe)) { throw "UserAtlas.exe was not installed" }
+          $p = Start-Process -FilePath $exe -ArgumentList "--selfcheck" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "The installed app doesn't work" }
+          $shortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\UserAtlas.lnk"
+          if (-not (Test-Path $shortcut)) { throw "Start menu shortcut is missing" }
+          Start-Process -FilePath (Join-Path $env:LOCALAPPDATA "Programs\UserAtlas\unins000.exe") -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES" -Wait
+          # The uninstaller continues from a temporary copy; give it a moment.
+          for ($i = 0; $i -lt 30 -and (Test-Path $exe); $i++) { Start-Sleep -Seconds 1 }
+          if (Test-Path $exe) { throw "Uninstalling left UserAtlas.exe behind" }
+          Write-Host "Installing and uninstalling work"
+
+      - name: Keep as test download
+        uses: actions/upload-artifact@v4
+        with:
+          name: UserAtlasSetup
+          path: dist/UserAtlasSetup.exe
+
+      - name: Publish release on GitHub
+        if: env.VERSION_TAG != '' && github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION_TAG }}
+          name: UserAtlas ${{ env.VERSION_TAG }}
+          target_commitish: ${{ github.sha }}
+          files: dist/UserAtlasSetup.exe
+          generate_release_notes: true
+          body: |
+            Download **UserAtlasSetup.exe** below, double-click it and follow the steps. No Python needed.
+            UserAtlas goes into your Start menu (and optionally your desktop) and can be removed via Settings → Apps.
+
+            First time? Windows may show "Windows protected your PC" because the installer isn't
+            digitally signed. Click *More info* → *Run anyway*.
+
+            You don't need to reinstall for new versions: the app fetches improvements from
+            GitHub every time it starts.

@@ -1,0 +1,5 @@
+# One name per line (commas or spaces work too). Anything after a # is ignored.
+pixelfox
+nightowl
+sunrise
+quack
