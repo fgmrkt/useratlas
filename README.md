@@ -30,6 +30,8 @@ Without internet, the most recently downloaded version starts. If a new version 
 | Other | GitHub, GitLab, Reddit, Twitch, SoundCloud |
 | Domains | .com, .net, .org, .nl, .eu, .io, .gg, .lol and any extension you add |
 
+Every name is also checked against each site's own naming rules (length, allowed characters, how a name may start or end, reserved words), right as you type it. The **Name rules** card on the Names tab tells you exactly why a site won't allow a name, for example *"Minecraft: too long (at most 16 characters)"* or *"X: can't contain 'twitter' or 'admin'"*. Names that break a site's rules are marked **not allowed** there and aren't sent to that site. When a site itself refuses a name (Roblox, X and Discord say so), its own reason is shown.
+
 The app first runs a self-test per platform: a known name must be taken and a random name must be available. Platforms that get this wrong are skipped, so you never get a false "available". Results are saved in `%APPDATA%\UserAtlas`, so you can stop and continue later.
 
 "Available" means no account or registration was found. Some names are still blocked or reserved; you'll only find out when claiming.
@@ -52,5 +54,7 @@ Note: anything you push to `main` in `app/` goes straight to all users. A broken
 pip install requests
 python app/useratlas.py                 # window
 python app/useratlas.py names.txt       # terminal
+python app/useratlas.py names.txt --rules   # only check each site's name rules (offline)
+python app/useratlas.py --list          # all platforms and their name rules
 python app/useratlas.py --help          # all options
 ```

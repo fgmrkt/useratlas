@@ -23,7 +23,8 @@ Terminal:
     python useratlas.py names.txt --tld com,nl,gg
     python useratlas.py names.txt --quiet         only show available names
     python useratlas.py --selftest                only test which platforms work right now
-    python useratlas.py --list                    show all platforms and groups
+    python useratlas.py names.txt --rules         only check each site's name rules (offline)
+    python useratlas.py --list                    show all platforms and their name rules
 
 How it works:
   - All platforms run at the same time, but each platform waits between checks
@@ -162,6 +163,23 @@ def json_or_none(r):
         return None
 
 
+def first_message(data) -> str:
+    """Finds the first human-readable 'message' in an error response."""
+    if isinstance(data, dict):
+        if isinstance(data.get("message"), str) and data.get("code") not in (None, 50035):
+            return data["message"]
+        for value in data.values():
+            found = first_message(value)
+            if found:
+                return found
+    elif isinstance(data, list):
+        for value in data:
+            found = first_message(value)
+            if found:
+                return found
+    return ""
+
+
 def shorten(text: str, n: int = 80) -> str:
     text = " ".join(str(text).split())
     return text if len(text) <= n else text[: n - 1] + "…"
@@ -187,7 +205,7 @@ NO_PROFILE = "no profile found"
 def check_minecraft(s, n):
     r = s.get(f"https://api.mojang.com/users/profiles/minecraft/{n}", timeout=TIMEOUT)
     if r.status_code == 400:
-        return INVALID, "Minecraft rejects this name"
+        return INVALID, "Minecraft says this name isn't allowed"
     return by_status(r, available=(204, 404))
 
 
@@ -205,7 +223,7 @@ def check_roblox(s, n):
             return AVAILABLE, ""
         if code == 1:
             return TAKEN, ""
-        return INVALID, shorten(d.get("message", f"Roblox code {code}"))
+        return INVALID, shorten(d.get("message") or f"Roblox says this name isn't allowed ({code})")
     return unexpected(r)
 
 
@@ -228,7 +246,7 @@ def check_discord(s, n):
     if r.status_code == 200 and isinstance(d, dict) and "taken" in d:
         return (TAKEN, "") if d["taken"] else (AVAILABLE, "")
     if r.status_code == 400:
-        return INVALID, "Discord rejects this name"
+        return INVALID, shorten(first_message(d) or "Discord says this name isn't allowed")
     return unexpected(r)
 
 
@@ -301,7 +319,7 @@ def check_x(s, n):
         reason = d.get("reason", "")
         if reason == "taken":
             return TAKEN, ""
-        return INVALID, shorten(d.get("desc") or reason or "X rejects this name")
+        return INVALID, shorten(d.get("desc") or reason or "X says this name isn't allowed")
     return unexpected(r)
 
 
@@ -498,27 +516,96 @@ def make_domain_check(tld: str) -> Callable:
 # The platform list
 # ---------------------------------------------------------------------------
 
+# Naming rules. Each platform has its own: length, allowed characters and a few
+# extra rules. problem() says in plain words why a name isn't allowed. Only rules
+# we're sure about are listed; anything else the site itself reports while checking.
+
+@dataclass
+class Rules:
+    min_len: int
+    max_len: int
+    chars: str                   # regex character class, e.g. "A-Za-z0-9_"
+    chars_text: str              # the same in words, e.g. "letters, numbers and _"
+    extra: tuple = ()            # (test(name) -> True when broken, rule in words)
+
+    def problem(self, name: str) -> Optional[str]:
+        if len(name) < self.min_len:
+            return f"too short (at least {self.min_len} characters)"
+        if len(name) > self.max_len:
+            return f"too long (at most {self.max_len} characters)"
+        bad = sorted({c for c in name if not re.fullmatch(f"[{self.chars}]", c)})
+        if bad:
+            shown = ", ".join("space" if c == " " else f"'{c}'" for c in bad[:4])
+            return f"{shown} not allowed (only {self.chars_text})"
+        for broken, rule in self.extra:
+            if broken(name):
+                return rule
+        return None
+
+    def describe(self) -> str:
+        length = (f"{self.min_len}–{self.max_len} characters" if self.max_len < 100
+                  else f"at least {self.min_len} characters")
+        return "; ".join([length, self.chars_text] + [rule for _, rule in self.extra])
+
+
+def must_start(chars: str, text: str):
+    return (lambda n: not re.match(f"[{chars}]", n), f"must start with {text}")
+
+
+def must_end(chars: str, text: str):
+    return (lambda n: not re.search(f"[{chars}]$", n), f"must end with {text}")
+
+
+def cant_start(prefix: str, text: str):
+    return (lambda n: n.startswith(prefix), f"can't start with {text}")
+
+
+def cant_end(*endings: str, text: str = ""):
+    words = text or " or ".join(f"'{e}'" for e in endings)
+    return (lambda n: n.lower().endswith(endings), f"can't end with {words}")
+
+
+def no_repeat(char: str, text: str):
+    return (lambda n: char * 2 in n, f"no two {text} in a row")
+
+
+def at_most(char: str, count: int, text: str):
+    return (lambda n: n.count(char) > count, f"at most {'one' if count == 1 else count} {text}")
+
+
+def no_word(*words: str):
+    return (lambda n: any(w in n.lower() for w in words),
+            "can't contain " + " or ".join(f"'{w}'" for w in words))
+
+
+def not_exactly(*words: str):
+    return (lambda n: n.lower() in words, "can't be " + " or ".join(f"'{w}'" for w in words))
+
+
+LETTER_OR_NUMBER = ("A-Za-z0-9", "a letter or number")
+
+
 @dataclass
 class Platform:
     key: str                     # short name for --platform, e.g. "minecraft"
     title: str                   # as shown in the overview
     group: str
     check: Callable
-    pattern: str                 # which names the platform allows
+    rules: Rules                 # which names the platform allows
     delay: float                 # seconds between checks
     known_names: List[str]       # for the self-test: these must be 'taken'
     lowercase: bool = False      # lowercase the name first
     link: str = ""               # page to view/claim, {n} = name
-    _regex: re.Pattern = field(init=False, repr=False)
-
-    def __post_init__(self):
-        self._regex = re.compile(self.pattern)
 
     def prepare(self, name: str) -> str:
         return name.lower() if self.lowercase else name
 
+    def problem(self, name: str) -> Optional[str]:
+        """Why this platform doesn't allow the name, or None if it fits the rules."""
+        return self.rules.problem(self.prepare(name))
+
     def valid(self, name: str) -> bool:
-        return self._regex.fullmatch(name) is not None
+        return self.problem(name) is None
 
     @property
     def short_title(self) -> str:
@@ -551,53 +638,80 @@ LINKS = {
 
 
 def all_platforms(tlds: List[str]) -> List[Platform]:
-    P = Platform
+    P, R = Platform, Rules
+    LN = LETTER_OR_NUMBER
+    words = "letters, numbers and _"
     platforms = [
         # gaming
         P("minecraft", "Minecraft", "gaming", check_minecraft,
-          r"[A-Za-z0-9_]{3,16}", 1.2, ["Notch", "jeb_"]),
+          R(3, 16, "A-Za-z0-9_", words), 1.2, ["Notch", "jeb_"]),
         P("roblox", "Roblox", "gaming", check_roblox,
-          r"[A-Za-z0-9_]{3,20}", 1.5, ["builderman", "Shedletsky"]),
+          R(3, 20, "A-Za-z0-9_", words, (must_start(*LN), must_end(*LN), at_most("_", 1, "_"))),
+          1.5, ["builderman", "Shedletsky"]),
         P("steam", "Steam (profile URL)", "gaming", check_steam,
-          r"[A-Za-z0-9_-]{3,32}", 1.5, ["gabelogannewell", "robinwalker"]),
+          R(3, 32, "A-Za-z0-9_-", "letters, numbers, _ and -"),
+          1.5, ["gabelogannewell", "robinwalker"]),
         P("discord", "Discord", "gaming", check_discord,
-          r"(?!.*\.\.)[a-z0-9_.]{2,32}", 4.0, ["discord", "wumpus"], lowercase=True),
+          R(2, 32, "a-z0-9_.", "letters, numbers, _ and .",
+            (no_repeat(".", "periods"), no_word("discord"), not_exactly("everyone", "here"))),
+          4.0, ["wumpus", "discord"], lowercase=True),
         P("chesscom", "Chess.com", "gaming", check_chesscom,
-          r"[A-Za-z0-9_-]{3,25}", 1.0, ["hikaru", "magnuscarlsen"]),
+          R(3, 25, "A-Za-z0-9_-", "letters, numbers, _ and -"),
+          1.0, ["hikaru", "magnuscarlsen"]),
         P("lichess", "Lichess", "gaming", check_lichess,
-          r"[A-Za-z0-9][A-Za-z0-9_-]{0,28}[A-Za-z0-9]", 1.5, ["thibault", "DrNykterstein"]),
+          R(2, 30, "A-Za-z0-9_-", "letters, numbers, _ and -", (must_start(*LN), must_end(*LN))),
+          1.5, ["thibault", "DrNykterstein"]),
         # socials
         P("instagram", "Instagram", "socials", check_instagram,
-          r"[A-Za-z0-9._]{1,30}", 5.0, ["instagram", "natgeo"]),
+          R(1, 30, "A-Za-z0-9._", "letters, numbers, . and _",
+            (cant_start(".", "a period"), cant_end(".", text="a period"),
+             no_repeat(".", "periods"))),
+          5.0, ["instagram", "natgeo"]),
         P("tiktok", "TikTok", "socials", check_tiktok,
-          r"[A-Za-z0-9._]{2,24}", 3.0, ["tiktok", "khaby.lame"]),
+          R(2, 24, "A-Za-z0-9._", "letters, numbers, . and _", (cant_end(".", text="a period"),)),
+          3.0, ["tiktok", "khaby.lame"]),
         P("x", "X / Twitter", "socials", check_x,
-          r"[A-Za-z0-9_]{1,15}", 3.0, ["elonmusk", "nasa"]),
+          R(4, 15, "A-Za-z0-9_", words, (no_word("twitter", "admin"),)),
+          3.0, ["elonmusk", "nasa"]),
         P("youtube", "YouTube (@handle)", "socials", check_youtube,
-          r"[A-Za-z0-9._-]{3,30}", 1.5, ["youtube", "mrbeast"]),
+          R(3, 30, "A-Za-z0-9._-", "letters, numbers, ., _ and -"),
+          1.5, ["youtube", "mrbeast"]),
         P("snapchat", "Snapchat", "socials", check_snapchat,
-          r"[A-Za-z][A-Za-z0-9._-]{2,14}", 2.0, ["teamsnapchat", "snapchat"]),
+          R(3, 15, "A-Za-z0-9._-", "letters, numbers, ., _ and -",
+            (must_start("A-Za-z", "a letter"), must_end(*LN))),
+          2.0, ["teamsnapchat", "snapchat"]),
         P("telegram", "Telegram", "socials", check_telegram,
-          r"[A-Za-z][A-Za-z0-9_]{4,31}", 2.0, ["durov", "telegram"]),
+          R(5, 32, "A-Za-z0-9_", words,
+            (must_start("A-Za-z", "a letter"), cant_end("_", text="_"))),
+          2.0, ["durov", "telegram"]),
         P("bluesky", "Bluesky (.bsky.social)", "socials", check_bluesky,
-          r"[a-z0-9][a-z0-9-]{1,16}[a-z0-9]", 0.5, ["jay", "pfrazee"], lowercase=True),
+          R(3, 18, "a-z0-9-", "letters, numbers and -", (must_start(*LN), must_end(*LN))),
+          0.5, ["jay", "pfrazee"], lowercase=True),
         # other
         P("github", "GitHub", "other", check_github,
-          r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}", 1.5, ["torvalds", "github"]),
+          R(1, 39, "A-Za-z0-9-", "letters, numbers and -",
+            (must_start(*LN), must_end(*LN), no_repeat("-", "hyphens"))),
+          1.5, ["torvalds", "github"]),
         P("gitlab", "GitLab", "other", check_gitlab,
-          r"[A-Za-z0-9][A-Za-z0-9_.-]{1,254}", 1.5, ["sytses", "dzaporozhets"]),
+          R(2, 255, "A-Za-z0-9_.-", "letters, numbers, _, . and -",
+            (cant_start("-", "-"), cant_end(".", text="a period"), cant_end(".git", ".atom"))),
+          1.5, ["sytses", "dzaporozhets"]),
         P("reddit", "Reddit", "other", check_reddit,
-          r"[A-Za-z0-9_-]{3,20}", 3.0, ["spez", "kn0thing"]),
+          R(3, 20, "A-Za-z0-9_-", "letters, numbers, _ and -"),
+          3.0, ["spez", "kn0thing"]),
         P("twitch", "Twitch", "other", check_twitch,
-          r"[A-Za-z0-9][A-Za-z0-9_]{3,24}", 1.5, ["ninja", "shroud"]),
+          R(4, 25, "A-Za-z0-9_", words, (cant_start("_", "_"),)),
+          1.5, ["ninja", "shroud"]),
         P("soundcloud", "SoundCloud", "other", check_soundcloud,
-          r"[A-Za-z0-9_-]{3,25}", 1.5, ["skrillex", "soundcloud"]),
+          R(3, 25, "A-Za-z0-9_-", "letters, numbers, _ and -"),
+          1.5, ["skrillex", "soundcloud"]),
     ]
     for p in platforms:
         p.link = LINKS.get(p.key, "")
     for tld in tlds:
         platforms.append(P(f"domain.{tld}", f".{tld}", "domains", make_domain_check(tld),
-                           r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", 1.0,
+                           R(1, 63, "a-z0-9-", "letters, numbers and -",
+                             (must_start(*LN), must_end(*LN))), 1.0,
                            ["google", "amazon", "hello"], lowercase=True,
                            link="https://www.namecheap.com/domains/registration/results/"
                                 f"?domain={{n}}.{tld}"))
@@ -609,6 +723,7 @@ def all_platforms(tlds: List[str]) -> List[Platform]:
 # ---------------------------------------------------------------------------
 
 COLOR = {AVAILABLE: "\033[92m", TAKEN: "\033[91m", INVALID: "\033[90m", UNKNOWN: "\033[93m"}
+SHOWN = {AVAILABLE: "available", TAKEN: "taken", INVALID: "not allowed", UNKNOWN: "unknown"}
 RESET = "\033[0m"
 _print_lock = threading.Lock()
 _output: Optional[Callable[[str], None]] = None  # the window catches messages here
@@ -623,8 +738,8 @@ def say(text: str = ""):
         print(text, flush=True)
 
 
-def colored(status: str, width: int = 9) -> str:
-    return f"{COLOR.get(status, '')}{status:<{width}}{RESET}"
+def colored(status: str, width: int = 11) -> str:
+    return f"{COLOR.get(status, '')}{SHOWN.get(status, status):<{width}}{RESET}"
 
 
 class Store:
@@ -675,7 +790,7 @@ class Store:
         if self.on_result is not None:
             self.on_result(name, p.key, status, detail)
         elif status == AVAILABLE or not self.quiet:
-            extra = f"  ({detail})" if detail and status != TAKEN else ""
+            extra = f"  – {detail}" if detail and status != TAKEN else ""
             say(f"  {colored(status)} {name:<20} {p.title}{extra}")
 
     def close(self):
@@ -720,8 +835,9 @@ def worker(p: Platform, names: List[str], store: Store, stop: threading.Event,
         if reuse and store.done(name, p):
             continue
         version = p.prepare(name)
-        if not p.valid(version):
-            store.save(name, p, INVALID, f"doesn't fit {p.title}'s name rules")
+        problem = p.rules.problem(version)
+        if problem:
+            store.save(name, p, INVALID, problem)
             continue
         status, detail = safe_check(p, s, version, stop)
         if status == UNKNOWN and stop.is_set():
@@ -863,8 +979,21 @@ def show_list():
         say(f"\n{g}:")
         for p in everything:
             if p.group == g:
-                say(f"  {p.key:<14} {p.title}")
+                say(f"  {p.key:<14} {p.title:<24} {p.rules.describe()}")
     say(f"\nChoose domain extensions with --tld (default: {STANDARD_TLDS}).")
+
+
+def rules_report(names: List[str], platforms: List[Platform]):
+    """Checks every name against every platform's naming rules, without going online."""
+    for name in names:
+        broken = [(p, p.problem(name)) for p in platforms]
+        broken = [(p, why) for p, why in broken if why]
+        if not broken:
+            say(f"  \033[92mallowed everywhere\033[0m  {name}")
+            continue
+        say(f"  {name}: not allowed on {len(broken)} of {len(platforms)}")
+        for p, why in broken:
+            say(f"      {p.title:<24} {why}")
 
 
 def write_overview(path: str, names: List[str], platforms: List[Platform],
@@ -878,7 +1007,7 @@ def write_overview(path: str, names: List[str], platforms: List[Platform],
         w = csv.writer(f, delimiter=";")
         w.writerow(["name", "available on"] + [p.title for p in platforms])
         for count, _, name, statuses in rows:
-            w.writerow([name, count] + statuses)
+            w.writerow([name, count] + [SHOWN.get(st, st) for st in statuses])
     return rows
 
 
@@ -989,14 +1118,14 @@ C = {
 CHIP = {
     AVAILABLE: ("#0F2A1C", "#4ADE80", "✓"),
     TAKEN: ("#2C1418", "#F87171", "✗"),
-    INVALID: ("#1A1A23", "#8B8BA3", "–"),
+    INVALID: ("#1E1A26", "#A1A1B5", "⊘"),
     UNKNOWN: ("#2E240C", "#FBBF24", "?"),
     "waiting": ("#211A38", "#A78BFA", "…"),
     "skipped": ("#17171F", "#5F5F75", "–"),
     "": ("#15151D", "#5F5F75", "·"),
 }
 CHIP_TEXT = {
-    AVAILABLE: "available", TAKEN: "taken", INVALID: "invalid name for this platform",
+    AVAILABLE: "available", TAKEN: "taken", INVALID: "not allowed",
     UNKNOWN: "unknown", "waiting": "still checking",
     "skipped": "skipped (failed the self-test)", "": "not checked yet",
 }
@@ -1239,6 +1368,7 @@ class UserAtlasWindow:
             "normal": (family, size), "bold": (family, size, "bold"), "small": (family, size - 1),
             "small_bold": (family, size - 1, "bold"), "heading": (family, size + 2, "bold"),
             "title": (family, size + 6, "bold"), "big": (family, size + 8, "bold"),
+            "small_strike": (family, size - 1, "overstrike"),
         }
         s = ttk.Style(self.root)
         try:
@@ -1504,6 +1634,7 @@ class UserAtlasWindow:
 
     def build_names(self, p):
         p.columnconfigure(0, weight=1)
+        p.columnconfigure(1, weight=1)
         p.rowconfigure(0, weight=1)
         k = Card(p, "Names", "Type or paste the names you want to check, one per line.")
         k.outer.grid(row=0, column=0, sticky="nsew", padx=(0, 16))
@@ -1520,25 +1651,59 @@ class UserAtlasWindow:
         ttk.Button(buttons, text="Clear", command=self.clear_names).pack(side="left", padx=(8, 0))
         ttk.Button(buttons, text="Next: platforms  →", style="Link.TButton",
                    command=lambda: self.show_tab("platforms")).pack(side="right")
+        ttk.Label(k.body, style="Card.Muted.TLabel", wraplength=520, justify="left",
+                  text="Tip: commas and spaces work too · an @ in front is removed · anything "
+                       "after # is a note · Ctrl+Enter starts checking").pack(anchor="w", pady=(10, 0))
 
-        tips = Card(p, "Tips")
-        tips.outer.grid(row=0, column=1, sticky="new")
-        for line in ["Commas and spaces between names work too.",
-                     "An @ in front of a name is removed.",
-                     "Duplicate names only count once.",
-                     "Anything after a # is ignored, handy for notes.",
-                     "Names that are too short or too long get 'invalid' per platform.",
-                     "Ctrl+Enter starts checking, Ctrl+1 to 5 switches tabs."]:
-            row = ttk.Frame(tips.body, style="Card.TFrame")
-            row.pack(fill="x", pady=(0, 10))
-            tk.Label(row, text="•", bg=C["card"], fg=C["accent"],
-                     font=self.f["bold"]).pack(side="left", anchor="n")
-            ttk.Label(row, text=line, style="Card.TLabel", wraplength=250,
-                      justify="left").pack(side="left", padx=(8, 0))
+        # Live check against each site's naming rules (no internet needed)
+        r = Card(p, "Name rules", "Is each name allowed by the sites you picked? Checked "
+                                  "right away, before you start.", wrap=420)
+        r.outer.grid(row=0, column=1, sticky="nsew")
+        self.rules_count = tk.StringVar(value="")
+        ttk.Label(r.head, textvariable=self.rules_count, style="Counter.TLabel").pack(side="right")
+        box = ttk.Frame(r.body, style="Card.TFrame")
+        box.pack(fill="both", expand=True)
+        self.rules_table = ttk.Treeview(box, columns=("name", "allowed", "problem"),
+                                        show="headings", selectmode="browse", height=8)
+        for col, title, width, stretch, anchor in (("name", "NAME", 140, False, "w"),
+                                                   ("allowed", "ALLOWED", 100, False, "center"),
+                                                   ("problem", "WHY NOT", 220, True, "w")):
+            self.rules_table.heading(col, text=title, anchor=anchor)
+            self.rules_table.column(col, width=width, minwidth=60, stretch=stretch, anchor=anchor)
+        self.rules_table.tag_configure("fits", foreground=C["green"])
+        self.rules_table.tag_configure("issue", foreground=C["amber"])
+        rs = ttk.Scrollbar(box, orient="vertical", command=self.rules_table.yview)
+        self.rules_table.configure(yscrollcommand=rs.set)
+        rs.pack(side="right", fill="y")
+        self.rules_table.pack(side="left", fill="both", expand=True)
+        self.rules_table.bind("<<TreeviewSelect>>", lambda e: self.show_rule_detail())
+        self.rules_empty = ttk.Label(box, style="Card.Muted.TLabel", justify="center",
+                                     text="Your names show up here as you type.")
+        self.rules_empty.place(relx=0.5, rely=0.45, anchor="center")
+
+        detail_border = tk.Frame(r.body, bg=C["field"], highlightthickness=1,
+                                 highlightbackground=C["border"])
+        detail_border.pack(fill="x", pady=(12, 0))
+        self.rules_detail = tk.Text(detail_border, height=7, wrap="word", state="disabled",
+                                    relief="flat", borderwidth=0, highlightthickness=0,
+                                    padx=12, pady=8, font=self.f["small"], bg=C["field"],
+                                    fg=C["text"], spacing1=2, spacing3=2,
+                                    selectbackground=C["selected"])
+        self.rules_detail.tag_configure("head", font=self.f["small_bold"], foreground="#FFFFFF")
+        self.rules_detail.tag_configure("site", foreground=C["accent_text"])
+        self.rules_detail.tag_configure("ok", foreground=C["green"])
+        self.rules_detail.tag_configure("muted", foreground=C["muted"])
+        self.rules_detail.pack(fill="both", expand=True)
+        self.rules_after = None
+        self.show_rule_detail()
 
     # -- tab: Platforms
 
     def build_platforms(self, p):
+        self.platform_hint_default = ("Hover a platform to see its name rules. Instagram, TikTok "
+                                      "and X don't like automated checks and sometimes drop out; "
+                                      "the self-test notices this and skips them.")
+        self.platform_hint = tk.StringVar(value=self.platform_hint_default)
         top = ttk.Frame(p)
         top.pack(fill="x", pady=(0, 14))
         self.platform_count = tk.StringVar()
@@ -1559,15 +1724,20 @@ class UserAtlasWindow:
             self.group_counts[group] = counter
             ttk.Label(k.head, textvariable=counter, style="Counter.TLabel").pack(side="right")
             if group == "domains":
-                items = [(f"domain.{t}", f".{t}") for t in split_list(STANDARD_TLDS)]
+                domain_rules = all_platforms(["com"])[-1].rules.describe()
+                items = [(f"domain.{t}", f".{t}", f".{t} domains: {domain_rules}")
+                         for t in split_list(STANDARD_TLDS)]
             else:
-                items = [(q.key, q.short_title) for q in self.everything if q.group == group]
-            for key, text in items:
+                items = [(q.key, q.short_title, f"{q.short_title} names: {q.rules.describe()}")
+                         for q in self.everything if q.group == group]
+            for key, text, rule_text in items:
                 v = tk.BooleanVar(value=True)
                 v.trace_add("write", lambda *_: self.update_summary())
                 self.checks[key] = v
-                ttk.Checkbutton(k.body, text=text, variable=v,
-                                style="Card.TCheckbutton").pack(anchor="w")
+                box = ttk.Checkbutton(k.body, text=text, variable=v, style="Card.TCheckbutton")
+                box.pack(anchor="w")
+                box.bind("<Enter>", lambda e, t=rule_text: self.platform_hint.set(t))
+                box.bind("<Leave>", lambda e: self.platform_hint.set(self.platform_hint_default))
             if group == "domains":
                 ttk.Label(k.body, text="Other extensions", style="Card.TLabel").pack(
                     anchor="w", pady=(12, 4))
@@ -1584,9 +1754,8 @@ class UserAtlasWindow:
             ttk.Button(foot, text="None", style="Link.TButton",
                        command=lambda g=group: self.set_group(g, False)).pack(side="left")
 
-        ttk.Label(p, text="Instagram, TikTok and X don't like automated checks and sometimes "
-                          "drop out. The self-test notices this and skips them.",
-                  style="Muted.TLabel").pack(anchor="w", pady=(14, 0))
+        ttk.Label(p, textvariable=self.platform_hint, style="Muted.TLabel", wraplength=1100,
+                  justify="left").pack(anchor="w", pady=(14, 0))
 
     # -- tab: Results
 
@@ -1854,6 +2023,72 @@ class UserAtlasWindow:
         self.platform_count.set(f"{total} {'platform' if total == 1 else 'platforms'} selected")
         self.summary_text.set(f"{n} {'name' if n == 1 else 'names'}   ·   "
                               f"{total} {'platform' if total == 1 else 'platforms'}")
+        if getattr(self, "rules_table", None) is not None:
+            if self.rules_after:
+                self.root.after_cancel(self.rules_after)
+            self.rules_after = self.root.after(250, self.refresh_rules)
+
+    # ----- name rules -------------------------------------------------------
+
+    def refresh_rules(self):
+        """Checks every name against the chosen platforms' naming rules."""
+        self.rules_after = None
+        names = names_from_text(self.names_box.get("1.0", "end"))[:1000]
+        platforms = self.chosen_platforms(quiet=True)
+        selected = self.rules_table.selection()
+        self.rules_table.delete(*self.rules_table.get_children())
+        self.rules_cache = {}
+        rows = []
+        for i, name in enumerate(names):
+            broken = [(q, q.problem(name)) for q in platforms]
+            broken = [(q, why) for q, why in broken if why]
+            self.rules_cache[name.lower()] = (name, broken, len(platforms))
+            rows.append((-len(broken), i, name, broken))
+        rows.sort(key=lambda r: (r[0] == 0, r[0], r[1]))  # names with problems first
+        for _, _, name, broken in rows:
+            if broken:
+                q, why = broken[0]
+                first = f"{q.short_title}: {why}"
+                if len(broken) > 1:
+                    first += f"  (+{len(broken) - 1} more)"
+            else:
+                first = "allowed everywhere"
+            self.rules_table.insert("", "end", iid=name.lower(), tags=("issue" if broken else "fits",),
+                                    values=(name, f"{len(platforms) - len(broken)} / {len(platforms)}",
+                                            first))
+        with_issues = sum(1 for r in rows if r[3])
+        if not names:
+            self.rules_count.set("")
+            self.rules_empty.place(relx=0.5, rely=0.45, anchor="center")
+        else:
+            self.rules_empty.place_forget()
+            self.rules_count.set(f"{with_issues} with problems" if with_issues else "all allowed")
+        if selected and self.rules_table.exists(selected[0]):
+            self.rules_table.selection_set(selected[0])
+        self.show_rule_detail()
+
+    def show_rule_detail(self):
+        box = self.rules_detail
+        box.configure(state="normal")
+        box.delete("1.0", "end")
+        sel = self.rules_table.selection()
+        entry = getattr(self, "rules_cache", {}).get(sel[0]) if sel else None
+        if not entry:
+            box.insert("end", "Pick a name above to see which sites don't allow it, and why. "
+                              "Names that break a site's rules are marked 'not allowed' there "
+                              "and aren't sent to that site.", ("muted",))
+        else:
+            name, broken, total = entry
+            if not broken:
+                box.insert("end", f"{name}", ("head",))
+                box.insert("end", f"  fits the rules of all {total} chosen sites.", ("ok",))
+            else:
+                box.insert("end", f"{name}", ("head",))
+                box.insert("end", f"  isn't allowed on {len(broken)} of {total} sites:\n", ("muted",))
+                for q, why in broken:
+                    box.insert("end", f"{q.title}", ("site",))
+                    box.insert("end", f"   {why}\n")
+        box.configure(state="disabled")
 
     # ----- start and stop ---------------------------------------------------
 
@@ -2124,13 +2359,14 @@ class UserAtlasWindow:
 
     def build_table(self, names, platforms):
         self.groups = [g for g in GROUPS if any(q.group == g for q in platforms)]
-        cols = ["name", "available"] + self.groups
+        cols = ["name", "available", "allowed"] + self.groups
         self.table.delete(*self.table.get_children())
         self.hidden = set()
         self.table.configure(columns=cols, displaycolumns=cols)
-        self.headings = {"name": "NAME", "available": "AVAILABLE"}
+        self.headings = {"name": "NAME", "available": "AVAILABLE", "allowed": "ALLOWED"}
         self.table.column("name", width=180, minwidth=110, stretch=True, anchor="w")
         self.table.column("available", width=100, minwidth=80, stretch=True, anchor="center")
+        self.table.column("allowed", width=90, minwidth=74, stretch=True, anchor="center")
         for g in self.groups:
             self.headings[g] = GROUP_TITLES[g].upper()
             self.table.column(g, width=90, minwidth=74, stretch=True, anchor="center")
@@ -2162,8 +2398,14 @@ class UserAtlasWindow:
             return "…" if self.busy else "–"
         return f"{st.count(AVAILABLE)} / {len(platforms)}" + ("" if all(st) else "  …")
 
+    def allowed_count(self, name) -> int:
+        """Platforms whose rules (and own answer) allow this name."""
+        return sum(1 for q in self.active_platforms()
+                   if self.status_of(name, q) != INVALID and not q.problem(name))
+
     def row_values(self, name):
-        return ([name, self.count_text(name, self.active_platforms())]
+        active = self.active_platforms()
+        return ([name, self.count_text(name, active), f"{self.allowed_count(name)} / {len(active)}"]
                 + [self.count_text(name, self.active_platforms(g)) for g in self.groups])
 
     def row_tags(self, name):
@@ -2209,6 +2451,8 @@ class UserAtlasWindow:
         def key(name):
             if col == "name":
                 return name.lower()
+            if col == "allowed":
+                return -self.allowed_count(name)
             return -self.available_count(name, None if col == "available" else col)
 
         self.hidden = set()
@@ -2251,10 +2495,11 @@ class UserAtlasWindow:
             grid = ttk.Frame(self.detail, style="Card.TFrame")
             grid.pack(anchor="w")
             for i, (kind, text) in enumerate(((AVAILABLE, "available"), (TAKEN, "taken"),
-                                              (INVALID, "invalid"), (UNKNOWN, "unknown"),
+                                              (INVALID, "not allowed"), (UNKNOWN, "unknown"),
                                               ("waiting", "checking"), ("skipped", "skipped"))):
                 bg, fg, symbol = CHIP[kind]
-                tk.Label(grid, text=f"{symbol}  {text}", bg=bg, fg=fg, font=self.f["small"],
+                tk.Label(grid, text=f"{symbol}  {text}", bg=bg, fg=fg,
+                         font=self.f["small_strike" if kind == INVALID else "small"],
                          padx=10, pady=5, anchor="w").grid(row=i // 3, column=i % 3, sticky="ew",
                                                           padx=(0, 6), pady=(0, 6))
             return
@@ -2318,15 +2563,19 @@ class UserAtlasWindow:
 
     def chip(self, parent, name, q, default):
         status, detail = self.results.get((name.lower(), q.key), ("", ""))
+        if not status and q.problem(name):
+            status, detail = INVALID, q.problem(name)
         kind = status or ("skipped" if q.key in self.skipped
                           else "waiting" if self.busy else "")
         bg, fg, symbol = CHIP.get(kind, CHIP[""])
         label = tk.Label(parent, text=f"{symbol}  {q.short_title}", bg=bg, fg=fg,
-                         font=self.f["small"], anchor="w", padx=10, pady=5,
+                         font=self.f["small_strike" if kind == INVALID else "small"],
+                         anchor="w", padx=10, pady=5,
                          cursor="hand2" if q.link else "")
-        hint = f"{q.title}: {CHIP_TEXT.get(kind, kind)}"
-        if detail:
-            hint += f" ({detail})"
+        if kind == INVALID and detail:
+            hint = f"{q.title} doesn't allow this name: {detail}"
+        else:
+            hint = f"{q.title}: {CHIP_TEXT.get(kind, kind)}" + (f" – {detail}" if detail else "")
         if q.link:
             hint += "   ·   click to open"
             label.bind("<Button-1>", lambda e: webbrowser.open(q.link_for(name)))
@@ -2524,7 +2773,9 @@ def main(argv=None):
                     help="only test which platforms work right now")
     ap.add_argument("--no-selftest", action="store_true",
                     help="skip the self-test and use every chosen platform")
-    ap.add_argument("--list", action="store_true", help="show all platforms")
+    ap.add_argument("--list", action="store_true", help="show all platforms and their name rules")
+    ap.add_argument("--rules", action="store_true",
+                    help="only check the names against each platform's rules (no internet)")
     ap.add_argument("--window", action="store_true",
                     help="open the window (also happens without arguments)")
     args = ap.parse_args(argv)
@@ -2549,6 +2800,9 @@ def main(argv=None):
         if not names:
             ap.print_usage()
             sys.exit("Give a file with names (one per line) or single names.")
+        if args.rules:
+            rules_report(names, platforms)
+            return 0
 
         store = Store(args.out, args.fresh, args.quiet)
         try:
