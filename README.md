@@ -50,6 +50,10 @@ Every name is also checked against each site's own naming rules (length, allowed
 
 **Blocked words.** Names that contain a slur or strong profanity are flagged in red as a **blocked word** and marked not allowed on sites that reject such handles at sign-up (all the gaming and social platforms). Code sites (GitHub, GitLab) and domains don't filter words, so they aren't affected. The check catches look-alike spellings too (for example `n1gga`, `f4g`) and ignores innocent words that merely contain a flagged substring (like *therapist* or *grapefruit*). The word list comes from the MIT-licensed [dsojevic/profanity-list](https://github.com/dsojevic/profanity-list) and is used only to reject offensive usernames — the app never shows which word matched.
 
+### Using your own proxy (optional)
+
+In **Settings → Proxy** you can route every check through a proxy you provide (`http://host:port` or `socks5h://host:port`; SOCKS needs `pip install requests[socks]`). It's handy if your connection gets rate-limited during big runs or you want to check from another region. **Test** confirms it connects; **Save** remembers it. Leave it empty to use your normal connection. From the terminal: `python app/useratlas.py names.txt --proxy http://host:port`.
+
 ### How availability is checked
 
 Where a site offers an official sign-up/validation endpoint — the same one its registration form uses — UserAtlas uses that rather than scraping a profile page, so the answer reflects whether you could actually claim the name at sign-up (Roblox, Discord, X, GitHub, GitLab, Reddit and Bluesky work this way; Minecraft and TikTok need a login and fall back to a profile lookup). The app does **not** create real accounts — that needs email confirmation and a CAPTCHA, and would make junk accounts — so the blocked-word filter above is what catches offensive names the availability endpoints would otherwise report as free.

@@ -191,12 +191,35 @@ def shorten(text: str, n: int = 80) -> str:
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
+# Optional proxy, set by the user. Empty = use the computer's normal connection.
+_PROXIES: Dict[str, str] = {}
+
+
+def set_proxy(url: str) -> bool:
+    """Route all checks through a user-supplied proxy. Returns True if it was set."""
+    global _PROXIES
+    url = (url or "").strip()
+    if not url:
+        _PROXIES = {}
+        return True
+    if not re.match(r"^(https?|socks5h?|socks4)://", url, re.I):
+        url = "http://" + url  # a bare host:port is treated as an http proxy
+    _PROXIES = {"http": url, "https": url}
+    return True
+
+
+def proxy_url() -> str:
+    return _PROXIES.get("https", "")
+
+
 def new_session() -> requests.Session:
     s = requests.Session()
     s.headers.update({
         "User-Agent": UA,
         "Accept-Language": "en-US,en;q=0.9",
     })
+    if _PROXIES:
+        s.proxies.update(_PROXIES)
     return s
 
 
@@ -1586,10 +1609,14 @@ class UserAtlasWindow:
         self.root.bind("<Control-Return>", lambda e: self.start())
         for i, (key, _) in enumerate(self.TABS, 1):
             self.root.bind(f"<Control-Key-{i}>", lambda e, k=key: self.show_tab(k))
+        self.settings_path = os.path.join(self.folder, "settings.json")
+        self.load_settings()
         self.show_tab("names")
         self.update_summary()
         self.root.after(100, self.process)
         self.log(f"UserAtlas {VERSION}. Results are saved in {self.log_path}")
+        if proxy_url():
+            self.log(f"Using proxy {proxy_url()}")
         if LAUNCHER and LAUNCHER.get("message"):
             self.log(LAUNCHER["message"])
             self.status.set(LAUNCHER["message"])
@@ -2128,8 +2155,24 @@ class UserAtlasWindow:
         field_.pack(side="left", fill="x", expand=True)
         ttk.Button(row, text="Open folder", command=self.open_folder).pack(side="left", padx=(8, 0))
 
+        px = Card(p, "Proxy (optional)",
+                  "Route every check through your own proxy — useful if your connection gets "
+                  "rate-limited during big runs, or to check from another region. Leave empty "
+                  "to use your normal connection. Example: http://host:port  or  "
+                  "socks5h://host:port (socks needs 'pip install requests[socks]').", wrap=900)
+        px.outer.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(0, 16))
+        row = ttk.Frame(px.body, style="Card.TFrame")
+        row.pack(fill="x")
+        self.proxy_var = tk.StringVar(value=proxy_url())
+        ttk.Entry(row, textvariable=self.proxy_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(row, text="Test", command=self.test_proxy).pack(side="left", padx=(8, 0))
+        ttk.Button(row, text="Save", command=self.save_proxy).pack(side="left", padx=(8, 0))
+        self.proxy_status = tk.StringVar(value="")
+        ttk.Label(px.body, textvariable=self.proxy_status, style="Card.Muted.TLabel",
+                  wraplength=900, justify="left").pack(anchor="w", pady=(8, 0))
+
         v = Card(p, "Version")
-        v.outer.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(0, 16))
+        v.outer.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(0, 16))
         row = ttk.Frame(v.body, style="Card.TFrame")
         row.pack(fill="x")
         ttk.Label(row, text=f"UserAtlas {VERSION}", style="Card.TLabel",
@@ -2152,7 +2195,7 @@ class UserAtlasWindow:
         self.check_button.pack(side="right", padx=(0, 12))
 
         w = Card(p, "Good to know")
-        w.outer.grid(row=3, column=0, columnspan=2, sticky="nsew")
+        w.outer.grid(row=4, column=0, columnspan=2, sticky="nsew")
         ttk.Label(w.body, style="Card.TLabel", wraplength=900, justify="left",
                   text="'Available' means no account or registration was found. Some names "
                        "are still blocked or reserved; you'll only find out when claiming. "
@@ -2985,6 +3028,51 @@ class UserAtlasWindow:
         except Exception as e:
             messagebox.showerror("UserAtlas", f"Couldn't open the folder:\n{e}")
 
+    # ----- proxy ------------------------------------------------------------
+
+    def load_settings(self):
+        try:
+            with open(self.settings_path, encoding="utf-8") as f:
+                set_proxy(json.load(f).get("proxy", ""))
+        except (OSError, ValueError):
+            pass
+
+    def save_proxy(self):
+        set_proxy(self.proxy_var.get())
+        try:
+            with open(self.settings_path, "w", encoding="utf-8") as f:
+                json.dump({"proxy": proxy_url()}, f)
+        except OSError as e:
+            self.proxy_status.set(f"Couldn't save the setting: {e}")
+            return
+        self.proxy_status.set(f"Saved. Checks now go through {proxy_url()}." if proxy_url()
+                              else "Saved. Using your normal connection.")
+
+    def test_proxy(self):
+        set_proxy(self.proxy_var.get())
+        if not proxy_url():
+            self.proxy_status.set("No proxy set — using your normal connection.")
+            return
+        self.proxy_status.set("Testing the proxy…")
+        url = proxy_url()
+
+        def run():
+            try:
+                s = new_session()
+                r = s.get("https://api.github.com/zen", timeout=15)
+                ok = r.status_code == 200
+                msg = (f"Proxy works — reached the internet through {url}." if ok
+                       else f"Proxy answered but the test request failed (HTTP {r.status_code}).")
+            except Exception as e:
+                msg = f"Couldn't connect through the proxy: {type(e).__name__}: {shorten(e, 120)}"
+            self.events.put(("log", msg))
+            self.events.put(("proxy_result", msg))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def on_proxy_result(self, msg):
+        self.proxy_status.set(msg)
+
     def log(self, text):
         self.log_box.configure(state="normal")
         self.log_box.insert("end", f"{datetime.now():%H:%M:%S}   ", ("time",))
@@ -3041,9 +3129,15 @@ def main(argv=None):
                     help="only check the names against each platform's rules (no internet)")
     ap.add_argument("--window", action="store_true",
                     help="open the window (also happens without arguments)")
+    ap.add_argument("--proxy", default="",
+                    help="route checks through your own proxy, e.g. http://host:port "
+                         "or socks5h://host:port (socks needs: pip install requests[socks])")
     args = ap.parse_args(argv)
     if args.window:
         return start_window()
+    if args.proxy:
+        set_proxy(args.proxy)
+        say(f"Using proxy {proxy_url()}")
 
     if args.list:
         show_list()
