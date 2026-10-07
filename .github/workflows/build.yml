@@ -42,8 +42,37 @@ jobs:
         run: |
           python -m py_compile app/useratlas.py launcher/launcher.py
           python -c "import json; d = json.load(open('app/info.json')); print('App version', d['version'], '| min launcher', d['min_launcher'])"
-          python -c "import json; d = json.load(open('app/blocklist.json')); print('Blocklist terms', len(d['terms']))"
           python app/useratlas.py --list
+
+      - name: The embedded word list is in sync with app/blocklist.json
+        run: |
+          cp app/useratlas.py /tmp/before.py
+          python tools/embed_blocklist.py
+          diff -q /tmp/before.py app/useratlas.py || { echo "Run tools/embed_blocklist.py and commit the result"; exit 1; }
+
+      - name: The blocked-word filter actually rejects slurs (and spares normal names)
+        env:
+          # base64 so the offensive test word isn't written in plain text; decoded only in memory
+          SLUR_B64: bmlnZ2E=
+          SLUR2_B64: ZmFnZ290
+        run: |
+          python - <<'PY'
+          import base64, os, sys
+          sys.path.insert(0, "app")
+          import useratlas as ua
+          assert ua.BLOCKLIST.terms, "blocklist did not load"
+          P = {p.key: p for p in ua.all_platforms(["com"])}
+          for b64 in (os.environ["SLUR_B64"], os.environ["SLUR2_B64"]):
+              name = base64.b64decode(b64).decode()
+              for key in ("minecraft", "roblox", "tiktok", "instagram", "twitch"):
+                  assert P[key].problem(name), f"{key} did NOT flag a slur"
+              # word sites reject it, but code sites / domains don't filter words
+              assert P["github"].problem(name) is None
+              assert P["domain.com"].problem(name) is None
+          for ok_name in ("pixelfox", "felixvanzanten", "therapist", "grapefruit", "nightowl"):
+              assert P["minecraft"].problem(ok_name) is None, f"false positive on {ok_name}"
+          print("Blocked-word filter verified: slurs rejected on word-filtering sites, normal names pass.")
+          PY
 
       - name: Decide whether to publish a release
         id: release
