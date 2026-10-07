@@ -102,11 +102,15 @@ def is_app() -> bool:
 
 
 def data_dir() -> str:
-    """Where results are kept: next to the script, or in AppData for the app."""
-    if is_app():
-        path = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "UserAtlas")
-    else:
+    """Where results are kept: next to the script, or a per-user folder for the app."""
+    if not is_app():
         path = os.path.dirname(os.path.abspath(__file__))
+    elif os.name == "nt":
+        path = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "UserAtlas")
+    elif sys.platform == "darwin":
+        path = os.path.expanduser("~/Library/Application Support/UserAtlas")
+    else:
+        path = os.path.expanduser("~/.local/share/useratlas")
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -585,6 +589,119 @@ def not_exactly(*words: str):
 LETTER_OR_NUMBER = ("A-Za-z0-9", "a letter or number")
 
 
+# ---------------------------------------------------------------------------
+# Blocked words: slurs and strong profanity that most sites reject at sign-up.
+# The word list (app/blocklist.json) comes from the MIT-licensed
+# dsojevic/profanity-list and is used only to FLAG such usernames as not
+# allowed. We never show which word matched, only that one did.
+# ---------------------------------------------------------------------------
+
+# Map look-alike characters back to letters so "n1gga" or "f4g" is still caught.
+_LEET_I = str.maketrans({"0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "6": "g",
+                         "7": "t", "8": "b", "9": "g", "@": "a", "$": "s", "!": "i"})
+_LEET_L = str.maketrans({"0": "o", "1": "l", "3": "e", "4": "a", "5": "s", "6": "g",
+                         "7": "t", "8": "b", "9": "g", "@": "a", "$": "s", "!": "i"})
+
+
+def _compile_term(alt: str):
+    """Turn one blocklist pattern into a regex; 'x*' means one or more x."""
+    alt = re.sub(r"[\s.\-]", "", alt.lower())
+    out, core = [], []
+    i = 0
+    while i < len(alt):
+        c = alt[i]
+        if i + 1 < len(alt) and alt[i + 1] == "*":
+            out.append(re.escape(c) + "+")
+            core.append(c)
+            i += 2
+        else:
+            out.append(re.escape(c))
+            core.append(c)
+            i += 1
+    return re.compile("".join(out)), len("".join(core))
+
+
+class Blocklist:
+    """Flags usernames that contain a slur or strong profanity.
+
+    - the whole name, or a word inside it, is a blocked term  -> always flagged;
+    - a high-risk term (slur or severity 4) appears inside the name -> flagged,
+      unless the name (or that word) is a known safe English word."""
+
+    def __init__(self, terms=(), safe_words=()):
+        self.safe = set(safe_words)
+        self.terms = []
+        for e in terms:
+            sev = e.get("severity", 3)
+            tags = set(e.get("tags", []))
+            slur = bool(tags & {"racial", "lgbtq"})
+            high_risk = sev >= 3
+            core_min = 4 if (slur or sev >= 4) else 5
+            exc = [x.replace(" ", "").split("*") for x in e.get("exceptions", [])]
+            for a in e.get("match", "").split("|"):
+                if a.strip():
+                    rx, core = _compile_term(a)
+                    self.terms.append((rx, core, high_risk, core_min, exc))
+
+    @staticmethod
+    def _forms(name: str) -> List[str]:
+        low = name.lower()
+        plain = re.sub(r"[^a-z0-9]", "", low)
+        a = re.sub(r"[^a-z]", "", low.translate(_LEET_I))
+        b = re.sub(r"[^a-z]", "", low.translate(_LEET_L))
+        return list(dict.fromkeys([plain, a, b]))
+
+    @staticmethod
+    def _tokens(name: str) -> set:
+        out = set()
+        for part in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", name):
+            low = part.lower()
+            out.update([low, low.translate(_LEET_I), low.translate(_LEET_L)])
+        return out
+
+    @staticmethod
+    def _excepted(form, start, end, matched, exceptions) -> bool:
+        for parts in exceptions:
+            rx = re.compile(re.escape(matched).join(re.escape(p) for p in parts))
+            for m in rx.finditer(form):
+                if m.start() <= start and m.end() >= end:
+                    return True
+        return False
+
+    def blocked(self, name: str) -> bool:
+        if not self.terms:
+            return False
+        forms = self._forms(name)
+        tokens = self._tokens(name)
+        safe_token = bool(tokens & self.safe)
+        for rx, core, high_risk, core_min, exc in self.terms:
+            for f in forms:
+                if rx.fullmatch(f):
+                    return True
+            for t in tokens:
+                if rx.fullmatch(t):
+                    return True
+            if high_risk and core >= core_min and not safe_token:
+                for f in forms:
+                    m = rx.search(f)
+                    if m and not self._excepted(f, m.start(), m.end(), m.group(), exc):
+                        return True
+        return False
+
+
+def load_blocklist() -> Blocklist:
+    try:
+        with open(resource_path("blocklist.json"), encoding="utf-8") as f:
+            d = json.load(f)
+        return Blocklist(d.get("terms", ()), d.get("safe_words", ()))
+    except (OSError, ValueError):
+        return Blocklist()  # no list found: skip word filtering rather than crash
+
+
+BLOCKLIST = load_blocklist()
+BLOCKED_REASON = "contains a blocked word (slur or strong profanity)"
+
+
 @dataclass
 class Platform:
     key: str                     # short name for --platform, e.g. "minecraft"
@@ -596,13 +713,17 @@ class Platform:
     known_names: List[str]       # for the self-test: these must be 'taken'
     lowercase: bool = False      # lowercase the name first
     link: str = ""               # page to view/claim, {n} = name
+    filters_words: bool = True    # does this site reject slurs/profanity in handles?
 
     def prepare(self, name: str) -> str:
         return name.lower() if self.lowercase else name
 
     def problem(self, name: str) -> Optional[str]:
         """Why this platform doesn't allow the name, or None if it fits the rules."""
-        return self.rules.problem(self.prepare(name))
+        prepared = self.prepare(name)
+        if self.filters_words and BLOCKLIST.blocked(prepared):
+            return BLOCKED_REASON
+        return self.rules.problem(prepared)
 
     def valid(self, name: str) -> bool:
         return self.problem(name) is None
@@ -691,11 +812,11 @@ def all_platforms(tlds: List[str]) -> List[Platform]:
         P("github", "GitHub", "other", check_github,
           R(1, 39, "A-Za-z0-9-", "letters, numbers and -",
             (must_start(*LN), must_end(*LN), no_repeat("-", "hyphens"))),
-          1.5, ["torvalds", "github"]),
+          1.5, ["torvalds", "github"], filters_words=False),
         P("gitlab", "GitLab", "other", check_gitlab,
           R(2, 255, "A-Za-z0-9_.-", "letters, numbers, _, . and -",
             (cant_start("-", "-"), cant_end(".", text="a period"), cant_end(".git", ".atom"))),
-          1.5, ["sytses", "dzaporozhets"]),
+          1.5, ["sytses", "dzaporozhets"], filters_words=False),
         P("reddit", "Reddit", "other", check_reddit,
           R(3, 20, "A-Za-z0-9_-", "letters, numbers, _ and -"),
           3.0, ["spez", "kn0thing"]),
@@ -713,6 +834,7 @@ def all_platforms(tlds: List[str]) -> List[Platform]:
                            R(1, 63, "a-z0-9-", "letters, numbers and -",
                              (must_start(*LN), must_end(*LN))), 1.0,
                            ["google", "amazon", "hello"], lowercase=True,
+                           filters_words=False,
                            link="https://www.namecheap.com/domains/registration/results/"
                                 f"?domain={{n}}.{tld}"))
     return platforms
@@ -835,7 +957,7 @@ def worker(p: Platform, names: List[str], store: Store, stop: threading.Event,
         if reuse and store.done(name, p):
             continue
         version = p.prepare(name)
-        problem = p.rules.problem(version)
+        problem = p.problem(name)  # naming rules + blocked-word filter
         if problem:
             store.save(name, p, INVALID, problem)
             continue
@@ -1672,6 +1794,7 @@ class UserAtlasWindow:
             self.rules_table.column(col, width=width, minwidth=60, stretch=stretch, anchor=anchor)
         self.rules_table.tag_configure("fits", foreground=C["green"])
         self.rules_table.tag_configure("issue", foreground=C["amber"])
+        self.rules_table.tag_configure("blocked", foreground=C["red"])
         rs = ttk.Scrollbar(box, orient="vertical", command=self.rules_table.yview)
         self.rules_table.configure(yscrollcommand=rs.set)
         rs.pack(side="right", fill="y")
@@ -1693,6 +1816,7 @@ class UserAtlasWindow:
         self.rules_detail.tag_configure("site", foreground=C["accent_text"])
         self.rules_detail.tag_configure("ok", foreground=C["green"])
         self.rules_detail.tag_configure("muted", foreground=C["muted"])
+        self.rules_detail.tag_configure("blocked", foreground=C["red"])
         self.rules_detail.pack(fill="both", expand=True)
         self.rules_after = None
         self.show_rule_detail()
@@ -2039,21 +2163,30 @@ class UserAtlasWindow:
         self.rules_table.delete(*self.rules_table.get_children())
         self.rules_cache = {}
         rows = []
+        blocked_total = 0
         for i, name in enumerate(names):
             broken = [(q, q.problem(name)) for q in platforms]
             broken = [(q, why) for q, why in broken if why]
-            self.rules_cache[name.lower()] = (name, broken, len(platforms))
-            rows.append((-len(broken), i, name, broken))
+            bad_word = BLOCKLIST.blocked(name.lower()) or BLOCKLIST.blocked(name)
+            if bad_word:
+                blocked_total += 1
+            self.rules_cache[name.lower()] = (name, broken, len(platforms), bad_word)
+            rows.append((-len(broken), i, name, broken, bad_word))
         rows.sort(key=lambda r: (r[0] == 0, r[0], r[1]))  # names with problems first
-        for _, _, name, broken in rows:
-            if broken:
+        for _, _, name, broken, bad_word in rows:
+            if bad_word:
+                first = "blocked word — rejected by most sites"
+                tag = "blocked"
+            elif broken:
                 q, why = broken[0]
                 first = f"{q.short_title}: {why}"
                 if len(broken) > 1:
                     first += f"  (+{len(broken) - 1} more)"
+                tag = "issue"
             else:
                 first = "allowed everywhere"
-            self.rules_table.insert("", "end", iid=name.lower(), tags=("issue" if broken else "fits",),
+                tag = "fits"
+            self.rules_table.insert("", "end", iid=name.lower(), tags=(tag,),
                                     values=(name, f"{len(platforms) - len(broken)} / {len(platforms)}",
                                             first))
         with_issues = sum(1 for r in rows if r[3])
@@ -2062,7 +2195,11 @@ class UserAtlasWindow:
             self.rules_empty.place(relx=0.5, rely=0.45, anchor="center")
         else:
             self.rules_empty.place_forget()
-            self.rules_count.set(f"{with_issues} with problems" if with_issues else "all allowed")
+            if blocked_total:
+                self.rules_count.set(f"{blocked_total} blocked word"
+                                     + ("s" if blocked_total != 1 else ""))
+            else:
+                self.rules_count.set(f"{with_issues} with problems" if with_issues else "all allowed")
         if selected and self.rules_table.exists(selected[0]):
             self.rules_table.selection_set(selected[0])
         self.show_rule_detail()
@@ -2078,12 +2215,16 @@ class UserAtlasWindow:
                               "Names that break a site's rules are marked 'not allowed' there "
                               "and aren't sent to that site.", ("muted",))
         else:
-            name, broken, total = entry
-            if not broken:
-                box.insert("end", f"{name}", ("head",))
+            name, broken, total, bad_word = entry
+            box.insert("end", f"{name}", ("head",))
+            if bad_word:
+                box.insert("end", "  contains a blocked word (a slur or strong profanity). "
+                                  "Most gaming and social sites reject names like this at sign-up, "
+                                  "so it's marked not allowed there. Domains and code sites "
+                                  "(GitHub, GitLab) don't filter words.", ("blocked",))
+            elif not broken:
                 box.insert("end", f"  fits the rules of all {total} chosen sites.", ("ok",))
             else:
-                box.insert("end", f"{name}", ("head",))
                 box.insert("end", f"  isn't allowed on {len(broken)} of {total} sites:\n", ("muted",))
                 for q, why in broken:
                     box.insert("end", f"{q.title}", ("site",))

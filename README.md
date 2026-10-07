@@ -2,13 +2,18 @@
 
 Find out in one go where your usernames are still available: gaming platforms, social networks, developer sites and domain names.
 
-**[⬇ Download UserAtlasSetup.exe](https://github.com/fgmrkt/useratlas/releases/latest/download/UserAtlasSetup.exe)** (Windows, no Python needed)
+**Download:** [UserAtlasSetup.exe (Windows)](https://github.com/fgmrkt/useratlas/releases/latest/download/UserAtlasSetup.exe) · [UserAtlas-macOS.zip (Mac)](https://github.com/fgmrkt/useratlas/releases/latest/download/UserAtlas-macOS.zip) — no Python needed.
 
 ## Installing
 
+**Windows**
 1. Download `UserAtlasSetup.exe` and double-click it.
 2. First time? Windows may show *"Windows protected your PC"* because the installer isn't digitally signed. Click **More info**, then **Run anyway**.
 3. UserAtlas is now in your Start menu (and on your desktop if you like). Remove it via **Settings → Apps**, like any other app.
+
+**macOS**
+1. Download `UserAtlas-macOS.zip`, unzip it and move `UserAtlas.app` into your Applications folder.
+2. First time: right-click the app and choose **Open** (it isn't signed by Apple), then confirm. After that you can open it normally.
 
 ## How the app keeps itself up to date
 
@@ -31,6 +36,12 @@ Without internet, the most recently downloaded version starts. If a new version 
 | Domains | .com, .net, .org, .nl, .eu, .io, .gg, .lol and any extension you add |
 
 Every name is also checked against each site's own naming rules (length, allowed characters, how a name may start or end, reserved words), right as you type it. The **Name rules** card on the Names tab tells you exactly why a site won't allow a name, for example *"Minecraft: too long (at most 16 characters)"* or *"X: can't contain 'twitter' or 'admin'"*. Names that break a site's rules are marked **not allowed** there and aren't sent to that site. When a site itself refuses a name (Roblox, X and Discord say so), its own reason is shown.
+
+**Blocked words.** Names that contain a slur or strong profanity are flagged in red as a **blocked word** and marked not allowed on sites that reject such handles at sign-up (all the gaming and social platforms). Code sites (GitHub, GitLab) and domains don't filter words, so they aren't affected. The check catches look-alike spellings too (for example `n1gga`, `f4g`) and ignores innocent words that merely contain a flagged substring (like *therapist* or *grapefruit*). The word list comes from the MIT-licensed [dsojevic/profanity-list](https://github.com/dsojevic/profanity-list) and is used only to reject offensive usernames — the app never shows which word matched.
+
+### How availability is checked
+
+Where a site offers an official sign-up/validation endpoint — the same one its registration form uses — UserAtlas uses that rather than scraping a profile page, so the answer reflects whether you could actually claim the name at sign-up (Roblox, Discord, X, GitHub, GitLab, Reddit and Bluesky work this way; Minecraft and TikTok need a login and fall back to a profile lookup). The app does **not** create real accounts — that needs email confirmation and a CAPTCHA, and would make junk accounts — so the blocked-word filter above is what catches offensive names the availability endpoints would otherwise report as free.
 
 The app first runs a self-test per platform: a known name must be taken and a random name must be available. Platforms that get this wrong are skipped, so you never get a false "available". Results are saved in `%APPDATA%\UserAtlas`, so you can stop and continue later.
 

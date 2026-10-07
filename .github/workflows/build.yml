@@ -7,9 +7,9 @@ name: Build
 #               A new installer is only needed when the launcher changes.
 #
 # When:
-#  - every push and pull request: check the app and build the installer as a test
+#  - every push and pull request: check the app and build Windows + macOS as a test
 #  - a tag like v1.2.0, or "Run workflow" with a version number:
-#    also publish the installer as a release on GitHub
+#    also publish the installers as a release on GitHub
 on:
   push:
     branches: [main]
@@ -120,11 +120,70 @@ jobs:
           files: dist/UserAtlasSetup.exe
           generate_release_notes: true
           body: |
+            ## Windows
             Download **UserAtlasSetup.exe** below, double-click it and follow the steps. No Python needed.
             UserAtlas goes into your Start menu (and optionally your desktop) and can be removed via Settings → Apps.
-
             First time? Windows may show "Windows protected your PC" because the installer isn't
             digitally signed. Click *More info* → *Run anyway*.
 
+            ## macOS
+            Download **UserAtlas-macOS.zip**, unzip it and move **UserAtlas.app** to your Applications folder.
+            The first time, right-click the app and choose **Open** (it isn't signed by Apple), then confirm.
+
             You don't need to reinstall for new versions: the app fetches improvements from
             GitHub every time it starts.
+
+  macos:
+    needs: check-app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install packages
+        run: python -m pip install --upgrade pip requests pyinstaller
+
+      - name: Build the app icon
+        run: |
+          mkdir -p icon.iconset
+          for s in 16 32 128 256 512; do
+            sips -z $s $s installer/useratlas.png --out "icon.iconset/icon_${s}x${s}.png"
+            sips -z $((s*2)) $((s*2)) installer/useratlas.png --out "icon.iconset/icon_${s}x${s}@2x.png"
+          done
+          iconutil -c icns icon.iconset -o useratlas.icns
+
+      - name: Build UserAtlas.app (the launcher)
+        run: >
+          pyinstaller --noconfirm --clean --windowed
+          --name UserAtlas
+          --icon useratlas.icns
+          launcher/launcher.py
+
+      - name: Check that everything is inside the app
+        run: |
+          ./dist/UserAtlas.app/Contents/MacOS/UserAtlas --selfcheck
+          if [ $? -ne 0 ]; then echo "UserAtlas.app is missing parts"; exit 1; fi
+          echo "Self-check passed"
+
+      - name: Zip the app
+        run: |
+          ditto -c -k --keepParent dist/UserAtlas.app dist/UserAtlas-macOS.zip
+          ls -lh dist/UserAtlas-macOS.zip
+
+      - name: Keep as test download
+        uses: actions/upload-artifact@v4
+        with:
+          name: UserAtlas-macOS
+          path: dist/UserAtlas-macOS.zip
+
+      - name: Publish release on GitHub
+        if: env.VERSION_TAG != '' && github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION_TAG }}
+          name: UserAtlas ${{ env.VERSION_TAG }}
+          target_commitish: ${{ github.sha }}
+          files: dist/UserAtlas-macOS.zip

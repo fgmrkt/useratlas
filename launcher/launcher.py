@@ -66,6 +66,8 @@ def base_dir() -> str:
     if os.name == "nt":
         base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
         return os.path.join(base, "UserAtlas")
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Application Support/UserAtlas")
     return os.path.join(os.path.expanduser("~"), ".local", "share", "useratlas")
 
 
