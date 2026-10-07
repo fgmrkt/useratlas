@@ -651,6 +651,29 @@ def whois_check(tld: str, domain: str) -> Result:
     return UNKNOWN, "could not read the WHOIS answer"
 
 
+def dns_registered(s, domain: str) -> Optional[Result]:
+    """Is the domain registered? Asked over DNS-over-HTTPS, which — unlike
+    WHOIS (a raw port-43 socket) — rides the user's proxy and isn't
+    WHOIS-rate-limited. A registered domain is delegated (has NS records); an
+    unregistered one comes back NXDOMAIN. Returns a Result, or None when DNS
+    can't give a clear answer, so the caller can fall back."""
+    try:
+        r = s.get("https://dns.google/resolve",
+                  params={"name": domain, "type": "NS"},
+                  headers={"Accept": "application/dns-json"}, timeout=TIMEOUT)
+        if r.status_code != 200:
+            return None
+        d = r.json()
+    except (requests.RequestException, ValueError, OSError):
+        return None
+    status = d.get("Status")
+    if status == 3:  # NXDOMAIN: the name doesn't exist, so it's free
+        return AVAILABLE, "via DNS"
+    if status == 0 and any(a.get("type") == 2 for a in d.get("Answer", [])):
+        return TAKEN, "via DNS"  # has NS records -> delegated -> registered
+    return None  # anything else is inconclusive; let the caller decide
+
+
 def make_domain_check(tld: str) -> Callable:
     def check(s, n):
         domain = f"{n}.{tld}"
@@ -663,10 +686,23 @@ def make_domain_check(tld: str) -> Callable:
             if r.status_code == 404:
                 return AVAILABLE, ""
             if r.status_code == 429:
-                raise RateLimited(retry_after(r))
+                # RDAP is rate-limiting us: try DNS (over the proxy) first.
+                return dns_registered(s, domain) or _raise_rate_limit(r)
             # any other answer: try WHOIS
-        return whois_check(tld, domain)
+        try:
+            return whois_check(tld, domain)
+        except RateLimited:
+            # WHOIS doesn't go through the proxy and is rate-limiting the real
+            # IP; DNS-over-HTTPS does go through the proxy, so try that instead.
+            doh = dns_registered(s, domain)
+            if doh is not None:
+                return doh
+            raise
     return check
+
+
+def _raise_rate_limit(r) -> Result:
+    raise RateLimited(retry_after(r))
 
 
 # ---------------------------------------------------------------------------
