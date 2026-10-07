@@ -1031,7 +1031,10 @@ def all_platforms(tlds: List[str]) -> List[Platform]:
         P("discord", "Discord", "gaming", check_discord,
           R(2, 32, "a-z0-9_.", "letters, numbers, _ and .",
             (no_repeat(".", "periods"), no_word("discord"), not_exactly("everyone", "here"))),
-          4.0, ["wumpus", "discord"], lowercase=True),
+          # Self-test controls must be valid *and* taken. Discord's new
+          # lowercase handles reject "discord" (reserved) as invalid, so use
+          # plain common names that migration-era users long since claimed.
+          4.0, ["john", "alex", "mike", "max"], lowercase=True),
         P("chesscom", "Chess.com", "gaming", check_chesscom,
           R(3, 25, "A-Za-z0-9_-", "letters, numbers, _ and -"),
           1.0, ["hikaru", "magnuscarlsen"]),
