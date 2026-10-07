@@ -1,15 +1,16 @@
 name: Build
 
 # UserAtlas has two parts:
-#  - app/       The actual app. UserAtlas.exe fetches this folder from GitHub on
+#  - app/       The actual app. The launcher fetches this folder from GitHub on
 #               every start, so a change here reaches everyone right after a push.
-#  - launcher/  UserAtlas.exe itself, packed into the installer UserAtlasSetup.exe.
-#               A new installer is only needed when the launcher changes.
+#  - launcher/  UserAtlas.exe / UserAtlas.app itself, packed into the downloads.
+#               New downloads are only needed when the launcher changes.
 #
 # When:
 #  - every push and pull request: check the app and build Windows + macOS as a test
-#  - a tag like v1.2.0, or "Run workflow" with a version number:
-#    also publish the installers as a release on GitHub
+#  - a push to main where installer/VERSION has no release yet: publish that release
+#    automatically (so a release is just: bump installer/VERSION and push)
+#  - a tag like v1.2.0, or "Run workflow" with a version number: publish that release
 on:
   push:
     branches: [main]
@@ -18,19 +19,18 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version number for a new installer release, e.g. 1.1.0 (empty = build only)"
+        description: "Version number for a new release, e.g. 1.1.0 (empty = build only)"
         required: false
         default: ""
 
 permissions:
   contents: write
 
-env:
-  VERSION_TAG: ${{ github.ref_type == 'tag' && github.ref_name || (inputs.version != '' && format('v{0}', inputs.version)) || '' }}
-
 jobs:
   check-app:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -42,11 +42,34 @@ jobs:
         run: |
           python -m py_compile app/useratlas.py launcher/launcher.py
           python -c "import json; d = json.load(open('app/info.json')); print('App version', d['version'], '| min launcher', d['min_launcher'])"
+          python -c "import json; d = json.load(open('app/blocklist.json')); print('Blocklist terms', len(d['terms']))"
           python app/useratlas.py --list
+
+      - name: Decide whether to publish a release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          tag=""
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            tag="${{ github.ref_name }}"
+          elif [ -n "$INPUT_VERSION" ]; then
+            tag="v$INPUT_VERSION"
+          elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            v=$(tr -d ' \r\n' < installer/VERSION)
+            if ! gh release view "v$v" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+              tag="v$v"
+            fi
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Release to publish: ${tag:-none}"
 
   windows:
     needs: check-app
     runs-on: windows-latest
+    env:
+      VERSION_TAG: ${{ needs.check-app.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -82,7 +105,7 @@ jobs:
       - name: Build the installer
         shell: pwsh
         run: |
-          $version = if ($env:VERSION_TAG) { $env:VERSION_TAG.TrimStart('v') } else { "0.0.0" }
+          $version = if ($env:VERSION_TAG) { $env:VERSION_TAG.TrimStart('v') } else { (Get-Content installer\VERSION).Trim() }
           & $env:ISCC "/DAppVersion=$version" installer\useratlas.iss
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup reported an error" }
           Get-Item dist\UserAtlasSetup.exe | Format-List Name, Length
@@ -104,34 +127,11 @@ jobs:
           if (Test-Path $exe) { throw "Uninstalling left UserAtlas.exe behind" }
           Write-Host "Installing and uninstalling work"
 
-      - name: Keep as test download
+      - name: Keep as download
         uses: actions/upload-artifact@v4
         with:
           name: UserAtlasSetup
           path: dist/UserAtlasSetup.exe
-
-      - name: Publish release on GitHub
-        if: env.VERSION_TAG != '' && github.event_name != 'pull_request'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.VERSION_TAG }}
-          name: UserAtlas ${{ env.VERSION_TAG }}
-          target_commitish: ${{ github.sha }}
-          files: dist/UserAtlasSetup.exe
-          generate_release_notes: true
-          body: |
-            ## Windows
-            Download **UserAtlasSetup.exe** below, double-click it and follow the steps. No Python needed.
-            UserAtlas goes into your Start menu (and optionally your desktop) and can be removed via Settings → Apps.
-            First time? Windows may show "Windows protected your PC" because the installer isn't
-            digitally signed. Click *More info* → *Run anyway*.
-
-            ## macOS
-            Download **UserAtlas-macOS.zip**, unzip it and move **UserAtlas.app** to your Applications folder.
-            The first time, right-click the app and choose **Open** (it isn't signed by Apple), then confirm.
-
-            You don't need to reinstall for new versions: the app fetches improvements from
-            GitHub every time it starts.
 
   macos:
     needs: check-app
@@ -139,12 +139,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      # The python.org build is universal2, so the app runs on Apple Silicon and Intel Macs.
+      - name: Install Python (python.org universal2 build)
+        run: |
+          curl -sSLo python.pkg https://www.python.org/ftp/python/3.12.10/python-3.12.10-macos11.pkg
+          sudo installer -pkg python.pkg -target /
+          echo "/Library/Frameworks/Python.framework/Versions/3.12/bin" >> "$GITHUB_PATH"
 
       - name: Install packages
-        run: python -m pip install --upgrade pip requests pyinstaller
+        run: |
+          python3.12 -m pip install --upgrade pip pyinstaller
+          # pure-Python build of charset-normalizer, so every part of the app is universal2
+          python3.12 -m pip install requests --no-binary charset-normalizer
+          python3.12 -c "import sysconfig; print('Python platform:', sysconfig.get_platform())"
 
       - name: Build the app icon
         run: |
@@ -157,33 +164,91 @@ jobs:
 
       - name: Build UserAtlas.app (the launcher)
         run: >
-          pyinstaller --noconfirm --clean --windowed
+          python3.12 -m PyInstaller --noconfirm --clean --windowed
           --name UserAtlas
           --icon useratlas.icns
+          --osx-bundle-identifier com.fgmrkt.useratlas
+          --target-arch universal2
           launcher/launcher.py
+
+      - name: Sign the app bundle (ad-hoc) and verify the signature
+        run: |
+          codesign --force --deep --sign - dist/UserAtlas.app
+          codesign --verify --deep --strict --verbose=2 dist/UserAtlas.app
+          echo "Architectures: $(lipo -archs dist/UserAtlas.app/Contents/MacOS/UserAtlas)"
+          echo "::notice title=mac-arch::UserAtlas.app architectures: $(lipo -archs dist/UserAtlas.app/Contents/MacOS/UserAtlas)"
 
       - name: Check that everything is inside the app
         run: |
           ./dist/UserAtlas.app/Contents/MacOS/UserAtlas --selfcheck
-          if [ $? -ne 0 ]; then echo "UserAtlas.app is missing parts"; exit 1; fi
           echo "Self-check passed"
+
+      - name: Launch test (fetches app/ from this repository and opens the window)
+        continue-on-error: true
+        run: |
+          DATA="$HOME/Library/Application Support/UserAtlas"
+          ./dist/UserAtlas.app/Contents/MacOS/UserAtlas &
+          PID=$!
+          for i in $(seq 1 45); do
+            [ -f "$DATA/app/current/useratlas.py" ] && break
+            sleep 1
+          done
+          sleep 10
+          if kill -0 $PID 2>/dev/null; then RUNNING=yes; else RUNNING=no; fi
+          screencapture -x launch.png 2>/dev/null || true
+          ls "$DATA/app/current" || true
+          cat "$DATA/launcher.log" 2>/dev/null || true
+          kill $PID 2>/dev/null || true
+          if [ -f "$DATA/app/current/useratlas.py" ]; then
+            echo "::notice title=mac-launch::macOS launcher fetched the app from GitHub; still running after 10s: $RUNNING"
+          else
+            echo "::warning title=mac-launch::macOS launcher did not fetch the app (still running: $RUNNING)"
+            exit 1
+          fi
 
       - name: Zip the app
         run: |
           ditto -c -k --keepParent dist/UserAtlas.app dist/UserAtlas-macOS.zip
           ls -lh dist/UserAtlas-macOS.zip
 
-      - name: Keep as test download
+      - name: Keep as download
         uses: actions/upload-artifact@v4
         with:
           name: UserAtlas-macOS
           path: dist/UserAtlas-macOS.zip
 
+  release:
+    needs: [check-app, windows, macos]
+    if: needs.check-app.outputs.tag != '' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
       - name: Publish release on GitHub
-        if: env.VERSION_TAG != '' && github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.VERSION_TAG }}
-          name: UserAtlas ${{ env.VERSION_TAG }}
+          tag_name: ${{ needs.check-app.outputs.tag }}
+          name: UserAtlas ${{ needs.check-app.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          files: dist/UserAtlas-macOS.zip
+          make_latest: true
+          files: |
+            dist/UserAtlasSetup.exe
+            dist/UserAtlas-macOS.zip
+          generate_release_notes: true
+          body: |
+            ## Windows
+            Download **UserAtlasSetup.exe** below, double-click it and follow the steps. No Python needed.
+            First time? Windows may show "Windows protected your PC" because the installer isn't
+            digitally signed. Click *More info* → *Run anyway*.
+
+            ## macOS (Apple Silicon and Intel)
+            1. Download **UserAtlas-macOS.zip**, open it, and drag **UserAtlas.app** into your Applications folder.
+            2. Open it once. macOS blocks it because the app isn't notarized by Apple. Click **Done** or **OK**.
+            3. Go to **System Settings → Privacy & Security**, scroll down to *"UserAtlas" was blocked*,
+               click **Open Anyway** and confirm. From then on it opens normally.
+
+            You don't need to reinstall for new versions: the app fetches improvements from
+            GitHub every time it starts.

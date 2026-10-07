@@ -11,9 +11,12 @@ Find out in one go where your usernames are still available: gaming platforms, s
 2. First time? Windows may show *"Windows protected your PC"* because the installer isn't digitally signed. Click **More info**, then **Run anyway**.
 3. UserAtlas is now in your Start menu (and on your desktop if you like). Remove it via **Settings → Apps**, like any other app.
 
-**macOS**
-1. Download `UserAtlas-macOS.zip`, unzip it and move `UserAtlas.app` into your Applications folder.
-2. First time: right-click the app and choose **Open** (it isn't signed by Apple), then confirm. After that you can open it normally.
+**macOS** (Apple Silicon and Intel)
+1. Download `UserAtlas-macOS.zip`, open it, and drag `UserAtlas.app` into your Applications folder.
+2. Open it once. macOS says it *"can't be opened because Apple cannot check it for malicious software"*. That's because the app isn't notarized by Apple, which needs a paid Apple developer account. Click **OK** or **Done**.
+3. Go to **System Settings → Privacy & Security**, scroll down to *"UserAtlas" was blocked*, click **Open Anyway** and confirm with your password or Touch ID. From then on it opens normally.
+
+   Prefer Terminal? `xattr -dr com.apple.quarantine /Applications/UserAtlas.app` does the same.
 
 ## How the app keeps itself up to date
 
@@ -52,7 +55,7 @@ The app first runs a self-test per platform: a known name must be taken and a ra
 | What you want | What you do |
 |---|---|
 | Improve the app | Change `app/useratlas.py` and push to `main`. Everyone gets it on their next start. Bump `version` in `app/info.json` when you want the version number in the app to change. |
-| A new installer | Only needed when `launcher/launcher.py` changes. Go to **Actions → Build → Run workflow** and enter a version number, e.g. `1.1.0`. |
+| New downloads (Windows installer + Mac app) | Only needed when `launcher/launcher.py` changes. Raise the number in `installer/VERSION` (e.g. `1.2.0`) and push. GitHub builds both and publishes the release on its own. |
 | The app needs a new Python package | Add the package to the build step and to `_bundled()` in the launcher, raise `LAUNCHER_VERSION`, set `min_launcher` in `app/info.json` to the same number, and release a new installer. Older launchers will then ask to update. |
 
 Every push is checked: the app must load, and on Windows the installer is built, test-installed and removed again. That test installer is under **Actions** → the run → *Artifacts*.
