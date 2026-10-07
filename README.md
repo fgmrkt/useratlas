@@ -12,6 +12,14 @@ Find out in one go where your usernames are still available: gaming platforms, s
 3. UserAtlas is now in your Start menu (and on your desktop if you like). Remove it via **Settings → Apps**, like any other app.
 
 **macOS** (Apple Silicon and Intel)
+
+Easiest: open **Terminal** and paste this line. It installs UserAtlas into Applications and opens it, without the Apple warning:
+
+```
+curl -fsSL https://raw.githubusercontent.com/fgmrkt/useratlas/main/install-mac.sh | bash
+```
+
+Or install it by hand:
 1. Download `UserAtlas-macOS.zip`, open it, and drag `UserAtlas.app` into your Applications folder.
 2. Open it once. macOS says it *"can't be opened because Apple cannot check it for malicious software"*. That's because the app isn't notarized by Apple, which needs a paid Apple developer account. Click **OK** or **Done**.
 3. Go to **System Settings → Privacy & Security**, scroll down to *"UserAtlas" was blocked*, click **Open Anyway** and confirm with your password or Touch ID. From then on it opens normally.

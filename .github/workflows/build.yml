@@ -211,6 +211,17 @@ jobs:
           ditto -c -k --keepParent dist/UserAtlas.app dist/UserAtlas-macOS.zip
           ls -lh dist/UserAtlas-macOS.zip
 
+      - name: Test the Terminal installer (installs the latest release)
+        run: |
+          bash -n install-mac.sh
+          USERATLAS_NO_OPEN=1 bash install-mac.sh
+          APP=/Applications/UserAtlas.app
+          [ -d "$APP" ] || APP="$HOME/Applications/UserAtlas.app"
+          codesign --verify --deep --strict "$APP"
+          if xattr -p com.apple.quarantine "$APP" 2>/dev/null; then echo "quarantine mark still set"; exit 1; fi
+          "$APP/Contents/MacOS/UserAtlas" --selfcheck
+          echo "::notice title=mac-install::Terminal installer works: $APP installed, signature valid, no quarantine mark"
+
       - name: Keep as download
         uses: actions/upload-artifact@v4
         with:
