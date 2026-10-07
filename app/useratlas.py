@@ -354,6 +354,23 @@ def check_telegram(s, n):
 
 
 def check_bluesky(s, n):
+    # The official sign-up check: the exact endpoint bsky.app's "create account"
+    # screen calls. It also rejects reserved/blocked handles, not just taken ones.
+    r = s.get("https://bsky.social/xrpc/com.atproto.temp.checkHandleAvailability",
+              params={"handle": f"{n}.bsky.social", "email": "a@example.com",
+                      "birthDate": "2000-01-01T00:00:00.000Z"}, timeout=TIMEOUT)
+    if r.status_code == 429:
+        raise RateLimited(retry_after(r))
+    d = json_or_none(r)
+    if isinstance(d, dict) and isinstance(d.get("result"), dict):
+        kind = str(d["result"].get("$type", ""))
+        if kind.endswith("resultAvailable"):
+            return AVAILABLE, ""
+        if kind.endswith("resultUnavailable"):
+            return TAKEN, ""
+    if isinstance(d, dict) and d.get("error") in ("InvalidHandle", "InvalidRequest"):
+        return INVALID, shorten(d.get("message") or "Bluesky says this handle isn't allowed")
+    # Fallback: the plain existence lookup, so a changed endpoint never breaks the check.
     r = s.get("https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle",
               params={"handle": f"{n}.bsky.social"}, timeout=TIMEOUT)
     if r.status_code == 200:
