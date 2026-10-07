@@ -5,3 +5,4 @@ dist/
 *.spec
 results.csv
 overview.csv
+settings.json
