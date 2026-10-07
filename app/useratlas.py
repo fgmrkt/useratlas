@@ -298,6 +298,21 @@ def new_session() -> requests.Session:
     return s
 
 
+def switch_session_proxy(s: requests.Session) -> str:
+    """Point this session at a different proxy than it uses now, so a
+    rate-limited check can retry from a fresh IP. Returns the new proxy URL,
+    or '' when there isn't another one to switch to."""
+    if proxy_count() < 2:
+        return ""
+    current = s.proxies.get("https", "")
+    for _ in range(proxy_count()):
+        url = next_proxy()
+        if url and url != current:
+            s.proxies.update({"http": url, "https": url})
+            return url
+    return ""
+
+
 def test_one_proxy(url: str, timeout: int = 12) -> Tuple[str, bool, str]:
     """Reach the internet through one proxy. Returns (url, ok, short reason)."""
     try:
@@ -1168,12 +1183,23 @@ class Store:
 def safe_check(p: Platform, s, name: str, stop: threading.Event,
                max_tries: int = 5, max_wait: float = 600) -> Result:
     wait = 15.0
+    pool = proxy_count()
+    switched = 0
     for attempt in range(max_tries):
         try:
             return p.check(s, name)
         except RateLimited as e:
-            w = min(e.wait or wait, max_wait)
             if attempt < max_tries - 1:
+                # With a pool of proxies, hop to a fresh IP and retry at once
+                # instead of waiting; only wait once every proxy was tried.
+                if pool > 1 and switched < pool - 1 and switch_session_proxy(s):
+                    switched += 1
+                    if not stop.is_set():
+                        say(f"  {p.title} rate-limited — switching proxy and retrying…")
+                    if stop.wait(1):
+                        return UNKNOWN, "stopped"
+                    continue
+                w = min(e.wait or wait, max_wait)
                 if not stop.is_set():
                     say(f"  {p.title} says 'slow down', waiting {max(1, round(w))} sec…")
                 if stop.wait(w):
@@ -2255,8 +2281,9 @@ class UserAtlasWindow:
                   "rate-limited during big runs, or to check from another region. Paste one "
                   "proxy per line in IP:PORT:USER:PASS form (how most providers give them); "
                   "IP:PORT without a login and full URLs like socks5h://host:port work too. "
-                  "With several, checks rotate through them. Leave empty to use your normal "
-                  "connection. (SOCKS needs 'pip install requests[socks]'.)", wrap=900)
+                  "With several, checks rotate through them and hop to another whenever one "
+                  "gets rate-limited. Leave empty to use your normal connection. "
+                  "(SOCKS needs 'pip install requests[socks]'.)", wrap=900)
         px.outer.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(0, 16))
         border, self.proxy_box = self.text_box(px.body, height=4, font=self.f["small"])
         border.pack(fill="x")
