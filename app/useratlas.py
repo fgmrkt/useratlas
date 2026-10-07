@@ -40,6 +40,7 @@ How it works:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
 import base64
 import hashlib
@@ -60,6 +61,7 @@ import webbrowser
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 try:
     import requests
@@ -191,25 +193,97 @@ def shorten(text: str, n: int = 80) -> str:
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
-# Optional proxy, set by the user. Empty = use the computer's normal connection.
-_PROXIES: Dict[str, str] = {}
+# Optional proxies, set by the user. Empty = use the computer's normal
+# connection. Several may be given (one per line); checks rotate through them.
+_PROXY_URLS: List[str] = []
+_proxy_i = 0
+_PROXY_TEST_URL = "https://api.github.com/zen"
 
 
-def set_proxy(url: str) -> bool:
-    """Route all checks through a user-supplied proxy. Returns True if it was set."""
-    global _PROXIES
-    url = (url or "").strip()
-    if not url:
-        _PROXIES = {}
-        return True
-    if not re.match(r"^(https?|socks5h?|socks4)://", url, re.I):
-        url = "http://" + url  # a bare host:port is treated as an http proxy
-    _PROXIES = {"http": url, "https": url}
+def parse_proxy_line(line: str) -> str:
+    """Turn one proxy into a requests proxy URL, or '' if it can't be read.
+
+    Accepts the format most providers hand out — IP:PORT:USER:PASS — as well as
+    IP:PORT without a login, and a full URL (http://, https://, socks5h://, …).
+    """
+    line = (line or "").strip()
+    if not line or line.startswith("#"):
+        return ""
+    if re.match(r"^[a-z][a-z0-9+.\-]*://", line, re.I):
+        return line  # already a full proxy URL; use it as given
+    parts = line.split(":")
+    if len(parts) == 2:
+        host, port, user, pwd = parts[0], parts[1], "", ""
+    elif len(parts) == 4:
+        host, port, user, pwd = parts
+    else:
+        return ""
+    host, port = host.strip(), port.strip()
+    if not host or not port.isdigit():
+        return ""
+    auth = f"{quote(user, safe='')}:{quote(pwd, safe='')}@" if user else ""
+    return f"http://{auth}{host}:{port}"
+
+
+def parse_proxies(text: str) -> Tuple[List[str], List[str]]:
+    """Read the user's proxy text (one per line) into (valid URLs, bad lines)."""
+    valid: List[str] = []
+    invalid: List[str] = []
+    seen = set()
+    for raw in re.split(r"[\r\n,]+", text or ""):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        url = parse_proxy_line(line)
+        if not url:
+            invalid.append(line)
+        elif url not in seen:
+            seen.add(url)
+            valid.append(url)
+    return valid, invalid
+
+
+def set_proxies(urls: List[str]) -> None:
+    global _PROXY_URLS, _proxy_i
+    _PROXY_URLS = list(urls)
+    _proxy_i = 0
+
+
+def apply_proxy_text(text: str) -> Tuple[List[str], List[str]]:
+    """Parse the user's proxy text and activate it; returns (valid, invalid)."""
+    valid, invalid = parse_proxies(text)
+    set_proxies(valid)
+    return valid, invalid
+
+
+# Kept so older callers (--proxy, a previously saved single proxy) still work.
+def set_proxy(text: str) -> bool:
+    apply_proxy_text(text)
     return True
 
 
+def proxy_count() -> int:
+    return len(_PROXY_URLS)
+
+
 def proxy_url() -> str:
-    return _PROXIES.get("https", "")
+    """The first proxy — for logging and backward compatibility."""
+    return _PROXY_URLS[0] if _PROXY_URLS else ""
+
+
+def next_proxy() -> str:
+    """The next proxy in the rotation, so load spreads evenly across them."""
+    global _proxy_i
+    if not _PROXY_URLS:
+        return ""
+    url = _PROXY_URLS[_proxy_i % len(_PROXY_URLS)]
+    _proxy_i += 1
+    return url
+
+
+def mask_proxy(url: str) -> str:
+    """Hide the password when a proxy URL is shown or logged."""
+    return re.sub(r"(://[^:@/]+:)[^@/]+@", r"\1***@", url or "")
 
 
 def new_session() -> requests.Session:
@@ -218,9 +292,31 @@ def new_session() -> requests.Session:
         "User-Agent": UA,
         "Accept-Language": "en-US,en;q=0.9",
     })
-    if _PROXIES:
-        s.proxies.update(_PROXIES)
+    url = next_proxy()
+    if url:
+        s.proxies.update({"http": url, "https": url})
     return s
+
+
+def test_one_proxy(url: str, timeout: int = 12) -> Tuple[str, bool, str]:
+    """Reach the internet through one proxy. Returns (url, ok, short reason)."""
+    try:
+        s = requests.Session()
+        s.headers.update({"User-Agent": UA})
+        s.proxies.update({"http": url, "https": url})
+        r = s.get(_PROXY_TEST_URL, timeout=timeout)
+        return (url, r.status_code == 200,
+                "ok" if r.status_code == 200 else f"HTTP {r.status_code}")
+    except Exception as e:
+        return (url, False, f"{type(e).__name__}: {shorten(e, 80)}")
+
+
+def test_proxies(urls: List[str], workers: int = 8) -> List[Tuple[str, bool, str]]:
+    """Test every proxy at once so a pool of them doesn't take minutes."""
+    if not urls:
+        return []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, len(urls))) as ex:
+        return list(ex.map(test_one_proxy, urls))
 
 
 # ---------------------------------------------------------------------------
@@ -1615,8 +1711,10 @@ class UserAtlasWindow:
         self.update_summary()
         self.root.after(100, self.process)
         self.log(f"UserAtlas {VERSION}. Results are saved in {self.log_path}")
-        if proxy_url():
-            self.log(f"Using proxy {proxy_url()}")
+        if proxy_count():
+            n = proxy_count()
+            self.log(f"Using {n} {'proxy' if n == 1 else 'proxies'} "
+                     f"(e.g. {mask_proxy(proxy_url())}).")
         if LAUNCHER and LAUNCHER.get("message"):
             self.log(LAUNCHER["message"])
             self.status.set(LAUNCHER["message"])
@@ -2154,15 +2252,23 @@ class UserAtlasWindow:
 
         px = Card(p, "Proxy (optional)",
                   "Route every check through your own proxy — useful if your connection gets "
-                  "rate-limited during big runs, or to check from another region. Leave empty "
-                  "to use your normal connection. Example: http://host:port  or  "
-                  "socks5h://host:port (socks needs 'pip install requests[socks]').", wrap=900)
+                  "rate-limited during big runs, or to check from another region. Paste one "
+                  "proxy per line in IP:PORT:USER:PASS form (how most providers give them); "
+                  "IP:PORT without a login and full URLs like socks5h://host:port work too. "
+                  "With several, checks rotate through them. Leave empty to use your normal "
+                  "connection. (SOCKS needs 'pip install requests[socks]'.)", wrap=900)
         px.outer.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(0, 16))
+        border, self.proxy_box = self.text_box(px.body, height=4, font=self.f["small"])
+        border.pack(fill="x")
+        # Faintly show the expected format in the empty box as a hint.
+        self._proxy_ph = "IP:PORT:USER:PASS\n(one proxy per line)"
+        self._proxy_ph_on = False
+        self.proxy_box.bind("<FocusIn>", lambda e: self._proxy_hide_ph(), add="+")
+        self.proxy_box.bind("<FocusOut>", lambda e: self._proxy_show_ph(), add="+")
+        self._proxy_show_ph()
         row = ttk.Frame(px.body, style="Card.TFrame")
-        row.pack(fill="x")
-        self.proxy_var = tk.StringVar(value=proxy_url())
-        ttk.Entry(row, textvariable=self.proxy_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(row, text="Test", command=self.test_proxy).pack(side="left", padx=(8, 0))
+        row.pack(fill="x", pady=(8, 0))
+        ttk.Button(row, text="Test", command=self.test_proxy).pack(side="left")
         ttk.Button(row, text="Save", command=self.save_proxy).pack(side="left", padx=(8, 0))
         self.proxy_status = tk.StringVar(value="")
         ttk.Label(px.body, textvariable=self.proxy_status, style="Card.Muted.TLabel",
@@ -3035,40 +3141,94 @@ class UserAtlasWindow:
     # ----- proxy ------------------------------------------------------------
 
     def load_settings(self):
+        text = ""
         try:
             with open(self.settings_path, encoding="utf-8") as f:
-                set_proxy(json.load(f).get("proxy", ""))
+                data = json.load(f)
+            text = data.get("proxies") or data.get("proxy") or ""
         except (OSError, ValueError):
-            pass
+            text = ""
+        apply_proxy_text(text)
+        if getattr(self, "proxy_box", None) is not None:
+            self._proxy_hide_ph()
+            self.proxy_box.delete("1.0", "end")
+            if text.strip():
+                self.proxy_box.insert("1.0", text.strip() + "\n")
+            self._proxy_show_ph()
+
+    def _proxy_show_ph(self):
+        """Show the faint IP:PORT:USER:PASS hint while the proxy box is empty."""
+        box = getattr(self, "proxy_box", None)
+        if box is None or box.get("1.0", "end").strip():
+            return
+        box.delete("1.0", "end")
+        box.insert("1.0", self._proxy_ph)
+        box.configure(fg=C["faint"])
+        self._proxy_ph_on = True
+
+    def _proxy_hide_ph(self):
+        """Clear the hint when the user focuses or fills the box."""
+        if getattr(self, "_proxy_ph_on", False):
+            self.proxy_box.delete("1.0", "end")
+            self.proxy_box.configure(fg=C["text"])
+            self._proxy_ph_on = False
+
+    def proxy_text(self) -> str:
+        """What the user actually typed — empty while the hint is showing."""
+        if getattr(self, "_proxy_ph_on", False):
+            return ""
+        return self.proxy_box.get("1.0", "end")
+
+    def proxy_summary(self, valid, invalid, saved=False):
+        pre = "Saved. " if saved else ""
+        n = len(valid)
+        if not n and not invalid:
+            return pre + "Using your normal connection."
+        bits = []
+        if n:
+            rot = " — checks rotate through them" if n > 1 else ""
+            bits.append(f"{n} {'proxy' if n == 1 else 'proxies'} active{rot}")
+        if invalid:
+            ex = ", ".join(shorten(x, 24) for x in invalid[:3])
+            more = "" if len(invalid) <= 3 else "…"
+            bits.append(f"{len(invalid)} line(s) skipped (bad format): {ex}{more}")
+        return pre + "; ".join(bits) + "."
 
     def save_proxy(self):
-        set_proxy(self.proxy_var.get())
+        text = self.proxy_text().strip()
+        valid, invalid = apply_proxy_text(text)
         try:
             with open(self.settings_path, "w", encoding="utf-8") as f:
-                json.dump({"proxy": proxy_url()}, f)
+                json.dump({"proxies": text}, f)
         except OSError as e:
             self.proxy_status.set(f"Couldn't save the setting: {e}")
             return
-        self.proxy_status.set(f"Saved. Checks now go through {proxy_url()}." if proxy_url()
-                              else "Saved. Using your normal connection.")
+        self.proxy_status.set(self.proxy_summary(valid, invalid, saved=True))
 
     def test_proxy(self):
-        set_proxy(self.proxy_var.get())
-        if not proxy_url():
-            self.proxy_status.set("No proxy set — using your normal connection.")
+        text = self.proxy_text()
+        valid, invalid = apply_proxy_text(text)
+        if not valid:
+            self.proxy_status.set(
+                "No proxies to test — using your normal connection." if not invalid
+                else f"Couldn't read {len(invalid)} line(s). Use IP:PORT:USER:PASS, one per line.")
             return
-        self.proxy_status.set("Testing the proxy…")
-        url = proxy_url()
+        self.proxy_status.set(f"Testing {len(valid)} "
+                              f"{'proxy' if len(valid) == 1 else 'proxies'}…")
 
         def run():
-            try:
-                s = new_session()
-                r = s.get("https://api.github.com/zen", timeout=15)
-                ok = r.status_code == 200
-                msg = (f"Proxy works — reached the internet through {url}." if ok
-                       else f"Proxy answered but the test request failed (HTTP {r.status_code}).")
-            except Exception as e:
-                msg = f"Couldn't connect through the proxy: {type(e).__name__}: {shorten(e, 120)}"
+            results = test_proxies(valid)
+            bad = [(u, info) for u, ok, info in results if not ok]
+            good = len(results) - len(bad)
+            msg = (f"{good} of {len(valid)} "
+                   f"{'proxy' if len(valid) == 1 else 'proxies'} reached the internet")
+            if invalid:
+                msg += f"; {len(invalid)} line(s) skipped (bad format)"
+            if bad:
+                u, info = bad[0]
+                msg += f". First that failed: {mask_proxy(u)} — {info}"
+            else:
+                msg += "."
             self.events.put(("log", msg))
             self.events.put(("proxy_result", msg))
 
@@ -3134,14 +3294,20 @@ def main(argv=None):
     ap.add_argument("--window", action="store_true",
                     help="open the window (also happens without arguments)")
     ap.add_argument("--proxy", default="",
-                    help="route checks through your own proxy, e.g. http://host:port "
-                         "or socks5h://host:port (socks needs: pip install requests[socks])")
+                    help="route checks through your own proxy in IP:PORT:USER:PASS form "
+                         "(or IP:PORT, or a full http/https/socks5h URL); separate several "
+                         "with commas and checks rotate through them")
     args = ap.parse_args(argv)
     if args.window:
         return start_window()
     if args.proxy:
-        set_proxy(args.proxy)
-        say(f"Using proxy {proxy_url()}")
+        valid, invalid = apply_proxy_text(args.proxy)
+        if valid:
+            n = len(valid)
+            say(f"Using {n} {'proxy' if n == 1 else 'proxies'} (e.g. {mask_proxy(valid[0])}).")
+        if invalid:
+            say(f"Skipped {len(invalid)} proxy entr{'y' if len(invalid) == 1 else 'ies'} "
+                f"with an unreadable format.")
 
     if args.list:
         show_list()
