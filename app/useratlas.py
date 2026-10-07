@@ -1791,77 +1791,86 @@ class UserAtlasWindow:
     def build(self):
         r = self.root
         r.title("UserAtlas")
-        r.geometry("1240x820")
-        r.minsize(1000, 660)
-        r.columnconfigure(0, weight=1)
-        r.rowconfigure(1, weight=1)
+        r.geometry("1340x816")
+        r.minsize(1120, 640)
+        r.columnconfigure(0, weight=0)   # sidebar (fixed width)
+        r.columnconfigure(1, weight=0)   # divider
+        r.columnconfigure(2, weight=1)   # content
+        r.rowconfigure(0, weight=1)
 
-        # Header: logo, title, summary, Start/Stop and the tabs
-        head = tk.Frame(r, bg=C["surface"])
-        head.grid(row=0, column=0, sticky="ew")
-        head.columnconfigure(0, weight=1)
-        top = tk.Frame(head, bg=C["surface"])
-        top.grid(row=0, column=0, sticky="ew", padx=24, pady=(16, 4))
-        top.columnconfigure(1, weight=1)
-        tk.Label(top, text="@", bg=C["accent"], fg="#FFFFFF", font=self.f["heading"],
-                 width=2, pady=3).grid(row=0, column=0, sticky="w", padx=(0, 12))
-        titles = tk.Frame(top, bg=C["surface"])
-        titles.grid(row=0, column=1, sticky="w")
-        ttk.Label(titles, text="UserAtlas", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(titles, text="Find out where your usernames are still available",
-                  style="Bar.Muted.TLabel").pack(anchor="w")
+        # ---- Left sidebar: brand, page navigation and every global control ----
+        side = tk.Frame(r, bg=C["surface"], width=208)
+        side.grid(row=0, column=0, sticky="ns")
+        side.pack_propagate(False)
+        tk.Frame(r, bg=C["border"], width=1).grid(row=0, column=1, sticky="ns")
 
-        # "New version" notice (hidden until there is an update)
-        self.update_pill = tk.Frame(top, bg=C["accent_soft"], cursor="hand2")
-        self.update_text = tk.Label(self.update_pill, text="", bg=C["accent_soft"],
-                                    fg=C["accent_text"], font=self.f["small"], cursor="hand2")
-        self.update_text.pack(side="left", padx=(12, 6), pady=6)
-        self.update_button = tk.Label(self.update_pill, text="Update", bg=C["accent_soft"],
-                                      fg="#FFFFFF", font=self.f["small_bold"], cursor="hand2")
-        self.update_button.pack(side="left", padx=(0, 12), pady=6)
-        for w in (self.update_pill, self.update_text, self.update_button):
-            w.bind("<Button-1>", lambda e: self.click_update())
-        self.update_pill.grid(row=0, column=2, padx=(0, 16))
-        self.update_pill.grid_remove()
-        self.summary_text = tk.StringVar()
-        ttk.Label(top, textvariable=self.summary_text,
-                  style="Bar.Muted.TLabel").grid(row=0, column=3, padx=(0, 16))
-        self.stop_button = ttk.Button(top, text="Stop", style="Stop.TButton",
-                                      command=self.stopping, state="disabled")
-        self.stop_button.grid(row=0, column=4, padx=(0, 8))
-        self.start_button = ttk.Button(top, text="Start checking", style="Accent.TButton",
-                                       command=self.start)
-        self.start_button.grid(row=0, column=5)
+        brand = tk.Frame(side, bg=C["surface"])
+        brand.pack(fill="x", padx=18, pady=(20, 18))
+        tk.Label(brand, text="@", bg=C["accent"], fg="#FFFFFF", font=self.f["heading"],
+                 width=2, pady=2).pack(side="left")
+        tk.Label(brand, text="UserAtlas", bg=C["surface"], fg=C["text"],
+                 font=self.f["heading"]).pack(side="left", padx=(11, 0))
 
-        tab_row = tk.Frame(head, bg=C["surface"])
-        tab_row.grid(row=1, column=0, sticky="ew", padx=14)
         self.tab_widgets = {}
+        self.nav_rows = {}
         for key, title in self.TABS:
-            t = tk.Frame(tab_row, bg=C["surface"], cursor="hand2")
-            t.pack(side="left")
-            row = tk.Frame(t, bg=C["surface"], cursor="hand2")
-            row.pack(padx=12, pady=(8, 9))
+            row = tk.Frame(side, bg=C["surface"], cursor="hand2")
+            row.pack(fill="x")
+            bar = tk.Frame(row, bg=C["surface"], width=3)
+            bar.pack(side="left", fill="y")
             label = tk.Label(row, text=title, bg=C["surface"], fg=C["muted"],
-                             font=self.f["bold"], cursor="hand2")
+                             font=self.f["bold"], anchor="w", padx=15, pady=9, cursor="hand2")
             label.pack(side="left")
-            badge = tk.Label(row, text="", font=self.f["small_bold"], padx=6)
-            underline = tk.Frame(t, bg=C["surface"], height=3)
-            underline.pack(fill="x", side="bottom")
-            for w in (t, row, label, badge):
+            badge = tk.Label(row, text="", font=self.f["small_bold"], padx=6, bg=C["surface"])
+            for w in (row, bar, label, badge):
                 w.bind("<Button-1>", lambda e, k=key: self.show_tab(k))
                 w.bind("<Enter>", lambda e, k=key: self.tab_hover(k, True))
                 w.bind("<Leave>", lambda e, k=key: self.tab_hover(k, False))
-            self.tab_widgets[key] = (label, underline, badge)
-        tk.Frame(head, bg=C["border"], height=1).grid(row=2, column=0, sticky="ew")
+            self.tab_widgets[key] = (label, bar, badge)
+            self.nav_rows[key] = row
 
-        # Pages
+        # Footer pinned to the bottom: counts, the "new version" notice,
+        # Start/Stop and the live status + progress.
+        foot = tk.Frame(side, bg=C["surface"])
+        foot.pack(side="bottom", fill="x", padx=18, pady=(12, 18))
+
+        self.summary_text = tk.StringVar()
+        ttk.Label(foot, textvariable=self.summary_text, style="Bar.Muted.TLabel").pack(
+            anchor="w", pady=(0, 10))
+
+        self.update_pill = tk.Frame(foot, bg=C["accent_soft"], cursor="hand2")
+        self.update_text = tk.Label(self.update_pill, text="", bg=C["accent_soft"],
+                                    fg=C["accent_text"], font=self.f["small"], cursor="hand2",
+                                    anchor="w", justify="left")
+        self.update_text.pack(side="left", padx=(10, 6), pady=6)
+        self.update_button = tk.Label(self.update_pill, text="Update", bg=C["accent_soft"],
+                                      fg="#FFFFFF", font=self.f["small_bold"], cursor="hand2")
+        self.update_button.pack(side="right", padx=(0, 10), pady=6)
+        for w in (self.update_pill, self.update_text, self.update_button):
+            w.bind("<Button-1>", lambda e: self.click_update())
+
+        self.start_button = ttk.Button(foot, text="Start checking", style="Accent.TButton",
+                                       command=self.start)
+        self.start_button.pack(fill="x")
+        self.stop_button = ttk.Button(foot, text="Stop", style="Stop.TButton",
+                                      command=self.stopping, state="disabled")
+        self.stop_button.pack(fill="x", pady=(8, 0))
+
+        self.status = tk.StringVar(value="Ready when you are.")
+        ttk.Label(foot, textvariable=self.status, style="Bar.Muted.TLabel",
+                  wraplength=168, justify="left").pack(anchor="w", pady=(14, 8))
+        self.progress = ttk.Progressbar(foot, style="Accent.Horizontal.TProgressbar",
+                                        mode="determinate")
+        self.progress.pack(fill="x")
+
+        # ---- Content: one frame per page, stacked and raised on demand ----
         holder = ttk.Frame(r)
-        holder.grid(row=1, column=0, sticky="nsew")
+        holder.grid(row=0, column=2, sticky="nsew")
         holder.columnconfigure(0, weight=1)
         holder.rowconfigure(0, weight=1)
         self.pages = {}
         for key, _ in self.TABS:
-            p = ttk.Frame(holder, padding=(24, 20))
+            p = ttk.Frame(holder, padding=(26, 22))
             p.grid(row=0, column=0, sticky="nsew")
             self.pages[key] = p
         self.build_names(self.pages["names"])
@@ -1869,18 +1878,6 @@ class UserAtlasWindow:
         self.build_results(self.pages["results"])
         self.build_selftest(self.pages["selftest"])
         self.build_settings(self.pages["settings"])
-
-        # Status bar
-        tk.Frame(r, bg=C["border"], height=1).grid(row=2, column=0, sticky="ew")
-        foot = tk.Frame(r, bg=C["surface"])
-        foot.grid(row=3, column=0, sticky="ew")
-        foot.columnconfigure(0, weight=1)
-        self.status = tk.StringVar(value="Ready when you are.")
-        ttk.Label(foot, textvariable=self.status, style="Bar.TLabel").grid(
-            row=0, column=0, sticky="w", padx=24, pady=11)
-        self.progress = ttk.Progressbar(foot, style="Accent.Horizontal.TProgressbar",
-                                        mode="determinate", length=280)
-        self.progress.grid(row=0, column=1, sticky="e", padx=24)
 
     def text_box(self, parent, height=None, font=None):
         """A dark multi-line text field with a border that lights up on focus."""
@@ -1922,7 +1919,7 @@ class UserAtlasWindow:
         ttk.Button(buttons, text="Clear", command=self.clear_names).pack(side="left", padx=(8, 0))
         ttk.Button(buttons, text="Next: platforms  →", style="Link.TButton",
                    command=lambda: self.show_tab("platforms")).pack(side="right")
-        ttk.Label(k.body, style="Card.Muted.TLabel", wraplength=520, justify="left",
+        ttk.Label(k.body, style="Card.Muted.TLabel", wraplength=430, justify="left",
                   text="Tip: commas and spaces work too · an @ in front is removed · anything "
                        "after # is a note · Ctrl+Enter starts checking").pack(anchor="w", pady=(10, 0))
 
@@ -2207,23 +2204,30 @@ class UserAtlasWindow:
     def show_tab(self, key):
         self.current_tab = key
         self.pages[key].tkraise()
-        for k, (label, underline, _) in self.tab_widgets.items():
+        for k, (label, bar, _) in self.tab_widgets.items():
             active = k == key
-            label.configure(fg="#FFFFFF" if active else C["muted"])
-            underline.configure(bg=C["accent"] if active else C["surface"])
+            bg = C["selected"] if active else C["surface"]
+            self.nav_rows[k].configure(bg=bg)
+            label.configure(fg="#FFFFFF" if active else C["muted"], bg=bg)
+            bar.configure(bg=C["accent"] if active else bg)
         if key == "selftest" and not self.busy:
             self.fill_test_table(self.chosen_platforms(quiet=True))
 
     def tab_hover(self, key, inside):
-        if key != self.current_tab:
-            self.tab_widgets[key][0].configure(fg=C["text"] if inside else C["muted"])
+        if key == self.current_tab:
+            return
+        bg = C["hover"] if inside else C["surface"]
+        label, bar, _ = self.tab_widgets[key]
+        self.nav_rows[key].configure(bg=bg)
+        label.configure(bg=bg, fg=C["text"] if inside else C["muted"])
+        bar.configure(bg=bg)
 
     def set_badge(self, key, text, warning=False):
         badge = self.tab_widgets[key][2]
         if text:
             badge.configure(text=text, bg=C["amber_soft"] if warning else C["accent_soft"],
                             fg=C["amber"] if warning else C["accent_text"])
-            badge.pack(side="left", padx=(8, 0))
+            badge.pack(side="right", padx=(0, 12))
         else:
             badge.pack_forget()
 
@@ -2955,7 +2959,7 @@ class UserAtlasWindow:
             self.update_status.set(f"Version {info['version']} is on GitHub.")
             self.update_text.configure(text=f"New version {info['version']}")
             self.update_button.configure(text="View")
-        self.update_pill.grid()
+        self.update_pill.pack(fill="x", pady=(0, 10), before=self.start_button)
         self.log("A new version is available.")
 
     def click_update(self):
