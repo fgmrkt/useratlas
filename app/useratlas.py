@@ -660,9 +660,53 @@ def check_bluesky(s, n):
     return unexpected(r)
 
 
+GITHUB_SIGNUP_TOKEN = re.compile(
+    r'<auto-check[^>]*src="/signup_check/username"[\s\S]*?data-csrf="true"[^>]*?value="([^"]+)"'
+    r'|<auto-check[^>]*src="/signup_check/username"[\s\S]*?value="([^"]+)"[^>]*data-csrf="true"')
+TAGS = re.compile(r"<[^>]+>")
+
+
+def github_signup_check(s, n) -> Optional[Result]:
+    """The check GitHub's sign-up form runs while you type a username. It also
+    knows names that are reserved or held by deleted and renamed accounts."""
+    token = getattr(s, "_github_signup_token", "")
+    for attempt in range(2):
+        if not token:
+            r = s.get("https://github.com/signup", timeout=TIMEOUT)
+            m = GITHUB_SIGNUP_TOKEN.search(r.text or "")
+            if not m:
+                return None
+            token = m.group(1) or m.group(2)
+            setattr(s, "_github_signup_token", token)
+        r = s.post("https://github.com/signup_check/username",
+                   data={"value": n, "authenticity_token": token},
+                   headers={"Referer": "https://github.com/signup"}, timeout=TIMEOUT)
+        if r.status_code == 429:
+            raise RateLimited(retry_after(r))
+        if r.status_code == 200:
+            return AVAILABLE, ""
+        if r.status_code == 422:
+            message = " ".join(TAGS.sub(" ", r.text or "").split())
+            if re.search(r"not available|unavailable|already taken|reserved", message, re.I):
+                return TAKEN, ""
+            if message and not re.search(r"token|session", message, re.I):
+                return INVALID, shorten(message)
+        # a stale or rejected token: fetch a fresh one once
+        token = ""
+        setattr(s, "_github_signup_token", "")
+    return None
+
+
 def check_github(s, n):
+    try:
+        found = github_signup_check(s, n)
+    except requests.RequestException:
+        found = None
+    if found:
+        return found
+    # Fallback: is there a profile? (Misses reserved and formerly used names.)
     r = s.head(f"https://github.com/{n}", allow_redirects=False, timeout=TIMEOUT)
-    return by_status(r, taken=(200, 301, 302))
+    return by_status(r, taken=(200, 301, 302), available_detail=NO_PROFILE)
 
 
 def check_gitlab(s, n):
@@ -3772,9 +3816,16 @@ class UserAtlasWindow:
         # The hint sits at the bottom and is placed first, so it's always visible.
         default = "Hover a platform for details; click one to open its page."
         self.hint = tk.StringVar(value=default)
-        ttk.Label(self.detail, textvariable=self.hint, style="Card.Muted.TLabel",
-                  wraplength=px(350), justify="left").pack(side="bottom", anchor="w",
-                                                           pady=(px(12), 0))
+        # A fixed two-line box, filled edge to edge, so a shorter hint fully
+        # replaces a longer one and the platforms above never shift.
+        line = tkfont.Font(font=self.f["normal"]).metrics("linespace")
+        box = ttk.Frame(self.detail, style="Card.TFrame", height=line * 2 + px(4))
+        box.pack(side="bottom", fill="x", pady=(px(12), 0))
+        box.pack_propagate(False)
+        hint = ttk.Label(box, textvariable=self.hint, style="Card.Muted.TLabel",
+                         wraplength=px(350), justify="left", anchor="nw")
+        hint.pack(fill="both", expand=True)
+        box.bind("<Configure>", lambda e: hint.configure(wraplength=max(px(120), e.width)))
 
         # The platforms sit in a scrollable area, for small windows or many extensions.
         holder = ttk.Frame(self.detail, style="Card.TFrame")
