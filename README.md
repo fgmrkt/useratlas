@@ -43,12 +43,12 @@ Without internet, the most recently downloaded version starts. If a new version 
 |---|---|
 | Gaming | Minecraft, Roblox, Steam, Discord, Chess.com |
 | Socials | Instagram, TikTok, X, Snapchat, Bluesky |
-| Other | GitHub, GitLab, Reddit, Twitch |
-| Domains | .com, .net, .org, .nl, .eu, .io, .gg, .lol and any extension you add |
+| Other | GitHub, Reddit, Twitch |
+| Domains | .com and .lol, plus any extension you add (.net, .nl, .io, …) |
 
 Every name is also checked against each site's own naming rules (length, allowed characters, how a name may start or end, reserved words), right as you type it. The **Name rules** card on the Names tab tells you exactly why a site won't allow a name, for example *"Minecraft: too long (at most 16 characters)"* or *"X: can't contain 'twitter' or 'admin'"*. Names that break a site's rules are marked **not allowed** there and aren't sent to that site. When a site itself refuses a name (Roblox, X and Discord say so), its own reason is shown.
 
-**Blocked words.** Names that contain a slur or strong profanity are flagged in red as a **blocked word** and marked not allowed on sites that reject such handles at sign-up (all the gaming and social platforms). Code sites (GitHub, GitLab) and domains don't filter words, so they aren't affected. The check catches look-alike spellings too (for example `n1gga`, `f4g`) and ignores innocent words that merely contain a flagged substring (like *therapist* or *grapefruit*). The word list comes from the MIT-licensed [dsojevic/profanity-list](https://github.com/dsojevic/profanity-list) and is used only to reject offensive usernames — the app never shows which word matched.
+**Blocked words.** Names that contain a slur or strong profanity are flagged in red as a **blocked word** and marked not allowed on sites that reject such handles at sign-up (all the gaming and social platforms). Code sites (GitHub) and domains don't filter words, so they aren't affected. The check catches look-alike spellings too (for example `n1gga`, `f4g`) and ignores innocent words that merely contain a flagged substring (like *therapist* or *grapefruit*). The word list comes from the MIT-licensed [dsojevic/profanity-list](https://github.com/dsojevic/profanity-list) and is used only to reject offensive usernames — the app never shows which word matched.
 
 ### Using your own proxy (optional)
 
@@ -56,7 +56,7 @@ In **Settings → Proxy** you can route every check through a proxy you provide 
 
 ### How availability is checked
 
-Where a site offers an official sign-up/validation endpoint — the same one its registration form uses — UserAtlas uses that rather than scraping a profile page, so the answer reflects whether you could actually claim the name at sign-up (Roblox, Discord, X, GitHub, GitLab, Reddit and Bluesky work this way; Minecraft and TikTok need a login and fall back to a profile lookup). The app does **not** create real accounts — that needs email confirmation and a CAPTCHA, and would make junk accounts — so the blocked-word filter above is what catches offensive names the availability endpoints would otherwise report as free.
+Where a site offers an official sign-up/validation endpoint — the same one its registration form uses — UserAtlas uses that rather than scraping a profile page, so the answer reflects whether you could actually claim the name at sign-up (Roblox, Discord, GitHub and Bluesky work this way; Minecraft and TikTok need a login and fall back to a profile lookup). The app does **not** create real accounts — that needs email confirmation and a CAPTCHA, and would make junk accounts — so the blocked-word filter above is what catches offensive names the availability endpoints would otherwise report as free.
 
 The app first runs a self-test per platform: a known name must be taken and a random name must be available. Platforms that get this wrong are skipped, so you never get a false "available". Results are saved in `%APPDATA%\UserAtlas`, so you can stop and continue later.
 

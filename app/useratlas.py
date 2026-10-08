@@ -89,7 +89,7 @@ CHECKS_VERSION = "4"
 TIMEOUT = 15
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
-STANDARD_TLDS = "com,net,org,nl,eu,io,gg,lol"
+STANDARD_TLDS = "com,lol"
 GROUPS = ["gaming", "socials", "other", "domains"]
 
 GITHUB_REPO = "fgmrkt/useratlas"
@@ -542,15 +542,6 @@ def check_github(s, n):
     # Fallback: is there a profile? (Misses reserved and formerly used names.)
     r = s.head(f"https://github.com/{n}", allow_redirects=False, timeout=TIMEOUT)
     return by_status(r, taken=(200, 301, 302), available_detail=NO_PROFILE, free=LIKELY)
-
-
-def check_gitlab(s, n):
-    r = s.get(f"https://gitlab.com/users/{n}/exists",
-              headers={"Accept": "application/json"}, timeout=TIMEOUT)
-    d = json_or_none(r)
-    if isinstance(d, dict) and "exists" in d:
-        return (TAKEN, "") if d["exists"] else (AVAILABLE, "")
-    return unexpected(r)
 
 
 # Reddit blocks anonymous checks from apps; its official API works with keys the
@@ -1129,7 +1120,6 @@ LINKS = {
     "snapchat": "https://www.snapchat.com/add/{n}",
     "bluesky": "https://bsky.app/profile/{n}.bsky.social",
     "github": "https://github.com/{n}",
-    "gitlab": "https://gitlab.com/{n}",
     "reddit": "https://www.reddit.com/user/{n}",
     "twitch": "https://www.twitch.tv/{n}",
 }
@@ -1183,10 +1173,6 @@ def all_platforms(tlds: List[str]) -> List[Platform]:
           R(1, 39, "A-Za-z0-9-", "letters, numbers and -",
             (must_start(*LN), must_end(*LN), no_repeat("-", "hyphens"))),
           1.5, ["torvalds", "github"], filters_words=False),
-        P("gitlab", "GitLab", "other", check_gitlab,
-          R(2, 255, "A-Za-z0-9_.-", "letters, numbers, _, . and -",
-            (cant_start("-", "-"), cant_end(".", text="a period"), cant_end(".git", ".atom"))),
-          1.5, ["sytses", "dzaporozhets"], filters_words=False),
         P("reddit", "Reddit", "other", check_reddit,
           R(3, 20, "A-Za-z0-9_-", "letters, numbers, _ and -"),
           3.0, ["spez", "kn0thing"]),
@@ -2695,7 +2681,7 @@ class UserAtlasWindow:
                 self.extra_tlds.trace_add("write", lambda *_: self.update_summary())
                 ttk.Entry(extra, textvariable=self.extra_tlds, style="Page.TEntry",
                           width=22).pack(side="left", padx=(px(14), px(14)))
-                ttk.Label(extra, text="For example: de, be, app", style="Page.TLabel").pack(
+                ttk.Label(extra, text="For example: net, nl, io, gg", style="Page.TLabel").pack(
                     side="left")
 
     # -- page: Results
@@ -3155,7 +3141,7 @@ class UserAtlasWindow:
                 box.insert("end", "  contains a blocked word (a slur or strong profanity). "
                                   "Most gaming and social sites reject names like this at sign-up, "
                                   "so it's marked not allowed there. Domains and code sites "
-                                  "(GitHub, GitLab) don't filter words.", ("blocked",))
+                                  "(GitHub) don't filter words.", ("blocked",))
             elif not broken:
                 box.insert("end", f"  fits the rules of all {total} chosen sites.", ("ok",))
             else:
