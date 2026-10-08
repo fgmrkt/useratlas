@@ -41,8 +41,8 @@ Without internet, the most recently downloaded version starts. If a new version 
 
 | Group | Platforms |
 |---|---|
-| Gaming | Minecraft, Roblox, Steam, Discord, Chess.com |
-| Socials | Instagram, TikTok, X, Snapchat, Bluesky |
+| Gaming | Minecraft, Roblox, Steam, Discord |
+| Socials | Instagram, TikTok, X |
 | Other | GitHub, Reddit, Twitch |
 | Domains | .com and .lol, plus any extension you add (.net, .nl, .io, …) |
 
@@ -56,7 +56,7 @@ In **Settings → Proxy** you can route every check through a proxy you provide 
 
 ### How availability is checked
 
-Where a site offers an official sign-up/validation endpoint — the same one its registration form uses — UserAtlas uses that rather than scraping a profile page, so the answer reflects whether you could actually claim the name at sign-up (Roblox, Discord, GitHub and Bluesky work this way; Minecraft and TikTok need a login and fall back to a profile lookup). The app does **not** create real accounts — that needs email confirmation and a CAPTCHA, and would make junk accounts — so the blocked-word filter above is what catches offensive names the availability endpoints would otherwise report as free.
+Where a site offers an official sign-up/validation endpoint — the same one its registration form uses — UserAtlas uses that rather than scraping a profile page, so the answer reflects whether you could actually claim the name at sign-up (Roblox, Discord and GitHub work this way; Minecraft and TikTok need a login and fall back to a profile lookup). The app does **not** create real accounts — that needs email confirmation and a CAPTCHA, and would make junk accounts — so the blocked-word filter above is what catches offensive names the availability endpoints would otherwise report as free.
 
 The app first runs a self-test per platform: a known name must be taken and a random name must be available. Platforms that get this wrong are skipped, so you never get a false "available". Results are saved in `%APPDATA%\UserAtlas`, so you can stop and continue later.
 

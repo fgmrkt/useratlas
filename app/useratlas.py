@@ -399,11 +399,6 @@ def check_discord(s, n):
     return unexpected(r)
 
 
-def check_chesscom(s, n):
-    r = s.get(f"https://api.chess.com/pub/player/{n.lower()}", timeout=TIMEOUT)
-    return by_status(r, taken=(200, 410))
-
-
 def check_instagram(s, n):
     r = s.get("https://www.instagram.com/api/v1/users/web_profile_info/",
               params={"username": n},
@@ -471,41 +466,6 @@ def check_x(s, n):
     if isinstance(d, dict) and d.get("errors"):
         # X answers 'internal error' for some names its sign-up screen calls taken
         return UNKNOWN, "X wouldn't say (often a name held by a suspended account)"
-    return unexpected(r)
-
-
-def check_snapchat(s, n):
-    # Snapchat's sign-up form only answers a real browser that passes its bot
-    # check, so all we can see is whether a public profile exists.
-    r = s.get(f"https://www.snapchat.com/add/{n}", timeout=TIMEOUT)
-    return by_status(r, available_detail="no public profile (private and deleted "
-                                          "accounts can still hold it)", free=LIKELY)
-
-
-def check_bluesky(s, n):
-    # The official sign-up check: the exact endpoint bsky.app's "create account"
-    # screen calls. It also rejects reserved/blocked handles, not just taken ones.
-    r = s.get("https://bsky.social/xrpc/com.atproto.temp.checkHandleAvailability",
-              params={"handle": f"{n}.bsky.social", "email": "a@example.com",
-                      "birthDate": "2000-01-01T00:00:00.000Z"}, timeout=TIMEOUT)
-    if r.status_code == 429:
-        raise RateLimited(retry_after(r))
-    d = json_or_none(r)
-    if isinstance(d, dict) and isinstance(d.get("result"), dict):
-        kind = str(d["result"].get("$type", ""))
-        if kind.endswith("resultAvailable"):
-            return AVAILABLE, ""
-        if kind.endswith("resultUnavailable"):
-            return TAKEN, ""
-    if isinstance(d, dict) and d.get("error") in ("InvalidHandle", "InvalidRequest"):
-        return INVALID, shorten(d.get("message") or "Bluesky says this handle isn't allowed")
-    # Fallback: the plain existence lookup, so a changed endpoint never breaks the check.
-    r = s.get("https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle",
-              params={"handle": f"{n}.bsky.social"}, timeout=TIMEOUT)
-    if r.status_code == 200:
-        return TAKEN, ""
-    if r.status_code == 400:
-        return AVAILABLE, ""
     return unexpected(r)
 
 
@@ -1113,12 +1073,9 @@ LINKS = {
     "roblox": "https://www.roblox.com/search/users?keyword={n}",
     "steam": "https://steamcommunity.com/id/{n}",
     "discord": "https://discord.com/login",
-    "chesscom": "https://www.chess.com/member/{n}",
     "instagram": "https://www.instagram.com/{n}/",
     "tiktok": "https://www.tiktok.com/@{n}",
     "x": "https://x.com/{n}",
-    "snapchat": "https://www.snapchat.com/add/{n}",
-    "bluesky": "https://bsky.app/profile/{n}.bsky.social",
     "github": "https://github.com/{n}",
     "reddit": "https://www.reddit.com/user/{n}",
     "twitch": "https://www.twitch.tv/{n}",
@@ -1146,9 +1103,6 @@ def all_platforms(tlds: List[str]) -> List[Platform]:
           # lowercase handles reject "discord" (reserved) as invalid, so use
           # plain common names that migration-era users long since claimed.
           4.0, ["john", "alex", "mike", "max"], lowercase=True),
-        P("chesscom", "Chess.com", "gaming", check_chesscom,
-          R(3, 25, "A-Za-z0-9_-", "letters, numbers, _ and -"),
-          1.0, ["hikaru", "magnuscarlsen"]),
         # socials
         P("instagram", "Instagram", "socials", check_instagram,
           R(1, 30, "A-Za-z0-9._", "letters, numbers, . and _",
@@ -1161,13 +1115,6 @@ def all_platforms(tlds: List[str]) -> List[Platform]:
         P("x", "X / Twitter", "socials", check_x,
           R(4, 15, "A-Za-z0-9_", words, (no_word("twitter", "admin"),)),
           3.0, ["elonmusk", "nasa"]),
-        P("snapchat", "Snapchat", "socials", check_snapchat,
-          R(3, 15, "A-Za-z0-9._-", "letters, numbers, ., _ and -",
-            (must_start("A-Za-z", "a letter"), must_end(*LN))),
-          2.0, ["teamsnapchat", "snapchat"]),
-        P("bluesky", "Bluesky (.bsky.social)", "socials", check_bluesky,
-          R(3, 18, "a-z0-9-", "letters, numbers and -", (must_start(*LN), must_end(*LN))),
-          0.5, ["jay", "pfrazee"], lowercase=True),
         # other
         P("github", "GitHub", "other", check_github,
           R(1, 39, "A-Za-z0-9-", "letters, numbers and -",
@@ -2941,7 +2888,7 @@ class UserAtlasWindow:
                                "official registry. ‘Probably free’ (○) means no account was "
                                "found, but the site has no public way to confirm it: banned, "
                                "deleted or private accounts can still hold such a name "
-                               "(TikTok, Snapchat, Instagram and X work this way). "
+                               "(TikTok, Instagram and X work this way). "
                                "Click a platform on the Results page to go straight to its "
                                "page.")).pack(anchor="w")
 
