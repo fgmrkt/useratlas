@@ -41,9 +41,9 @@ Without internet, the most recently downloaded version starts. If a new version 
 
 | Group | Platforms |
 |---|---|
-| Gaming | Minecraft, Roblox, Steam, Discord, Chess.com, Lichess |
-| Socials | Instagram, TikTok, X, YouTube, Snapchat, Telegram, Bluesky |
-| Other | GitHub, GitLab, Reddit, Twitch, SoundCloud |
+| Gaming | Minecraft, Roblox, Steam, Discord, Chess.com |
+| Socials | Instagram, TikTok, X, Snapchat, Bluesky |
+| Other | GitHub, GitLab, Reddit, Twitch |
 | Domains | .com, .net, .org, .nl, .eu, .io, .gg, .lol and any extension you add |
 
 Every name is also checked against each site's own naming rules (length, allowed characters, how a name may start or end, reserved words), right as you type it. The **Name rules** card on the Names tab tells you exactly why a site won't allow a name, for example *"Minecraft: too long (at most 16 characters)"* or *"X: can't contain 'twitter' or 'admin'"*. Names that break a site's rules are marked **not allowed** there and aren't sent to that site. When a site itself refuses a name (Roblox, X and Discord say so), its own reason is shown.

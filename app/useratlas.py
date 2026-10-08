@@ -404,13 +404,6 @@ def check_chesscom(s, n):
     return by_status(r, taken=(200, 410))
 
 
-def check_lichess(s, n):
-    r = s.get(f"https://lichess.org/api/user/{n}", timeout=TIMEOUT)
-    if r.status_code == 429:
-        raise RateLimited(retry_after(r) or 60)  # Lichess asks for a full minute
-    return by_status(r)
-
-
 def check_instagram(s, n):
     r = s.get("https://www.instagram.com/api/v1/users/web_profile_info/",
               params={"username": n},
@@ -481,145 +474,12 @@ def check_x(s, n):
     return unexpected(r)
 
 
-def check_youtube(s, n):
-    consent = {"SOCS": "CAI", "CONSENT": "YES+cb"}
-    r = s.get(f"https://www.youtube.com/@{n}", cookies=consent, timeout=TIMEOUT)
-    if "consent." in r.url:
-        return UNKNOWN, "YouTube's cookie notice is in the way"
-    if r.status_code != 404:
-        return by_status(r)
-    # No channel uses this @handle, but YouTube also keeps a handle for every
-    # channel whose old custom URL (/c/name) or username (/user/name) it is.
-    for path in (f"c/{n}", f"user/{n}"):
-        r = s.get(f"https://www.youtube.com/{path}", cookies=consent, timeout=TIMEOUT)
-        if r.status_code == 200:
-            return TAKEN, f"reserved by a channel's old URL (youtube.com/{path})"
-        if r.status_code not in (404, 410):
-            return unexpected(r)
-    return LIKELY, "no channel found (closed channels can still hold a handle)"
-
-
 def check_snapchat(s, n):
     # Snapchat's sign-up form only answers a real browser that passes its bot
     # check, so all we can see is whether a public profile exists.
     r = s.get(f"https://www.snapchat.com/add/{n}", timeout=TIMEOUT)
     return by_status(r, available_detail="no public profile (private and deleted "
                                           "accounts can still hold it)", free=LIKELY)
-
-
-# t.me alone can't tell a free name from one in use: accounts without a public
-# page (and unused collectibles) show the same "you can contact @name" page as a
-# free name. Fragment (fragment.com, Telegram's official username marketplace)
-# reports a status for every name: "Unavailable" means nobody has it and it isn't
-# sold, so it can be claimed; "Taken" means an account uses it; "Available",
-# "On auction", "For sale" and "Sold" mean it's a collectible that must be bought.
-FRAGMENT_STATUS = re.compile(
-    r'class="([^"]*\btm-status-(\w+)\b[^"]*)"[^>]*>\s*([^<]*?)\s*<')
-FRAGMENT_ROW = re.compile(r'<tr[^>]*tm-row-selectable[^>]*>(.*?)</tr>', re.S)
-FRAGMENT_CSS = {"avail": "available", "unavail": "unavailable", "taken": "taken"}
-
-
-def _fragment_html(r) -> Optional[str]:
-    if r.status_code == 429:
-        raise RateLimited(retry_after(r))
-    if r.status_code != 200:
-        return None
-    d = json_or_none(r)
-    if isinstance(d, dict):
-        return d.get("h") or ""
-    return r.text
-
-
-def _fragment_status(css_class: str, css: str, text: str) -> str:
-    text = " ".join(text.split()).lower()
-    return text or FRAGMENT_CSS.get(css.lower(), css.lower())
-
-
-def fragment_status(s, n) -> Optional[str]:
-    """Fragment's status for this name, lowercased ('taken', 'available',
-    'on auction', 'for sale', 'sold', 'unavailable'); '' when Fragment has no
-    page for it (nobody uses it and it isn't sold); None when Fragment couldn't
-    be read."""
-    name = n.lower()
-    # 1) The name's own page. Its header shows the status; a name nobody has
-    #    gets no page and is sent to the search page instead.
-    try:
-        r = s.get(f"https://fragment.com/username/{name}",
-                  headers={"X-Requested-With": "XMLHttpRequest",
-                           "X-Aj-Referer": f"https://fragment.com/?query={name}",
-                           "Accept": "application/json, text/javascript, */*; q=0.01"},
-                  allow_redirects=False, timeout=TIMEOUT)
-        if r.status_code in (301, 302, 303, 307, 308):
-            if "query=" in r.headers.get("Location", ""):
-                return ""
-        else:
-            d = json_or_none(r)
-            if r.status_code == 200 and isinstance(d, dict) and not d.get("h") \
-                    and "query=" in str(d.get("r", "")):
-                return ""
-            html = _fragment_html(r)
-            for m in FRAGMENT_STATUS.finditer(html or ""):
-                if "tm-section-header-status" in m.group(1):
-                    return _fragment_status(*m.groups())
-    except requests.RequestException:
-        pass
-    # 2) The search page: a row per name that Fragment knows, with its status.
-    try:
-        r = s.get("https://fragment.com/", params={"query": name}, timeout=TIMEOUT)
-        html = _fragment_html(r)
-    except requests.RequestException:
-        return None
-    if not html or "tm-" not in html:
-        return None
-    for row in FRAGMENT_ROW.findall(html):
-        names = re.findall(r'/username/([A-Za-z0-9_]+)|>\s*@([A-Za-z0-9_]+)\s*<', row)
-        if any(name == (a or b).lower() for a, b in names):
-            m = FRAGMENT_STATUS.search(row)
-            return _fragment_status(*m.groups()) if m else None
-    return ""  # a real search page without this name: Fragment doesn't know it
-
-
-def ton_collectible(s, n) -> Optional[bool]:
-    """Is this name a minted collectible (an NFT on the TON blockchain)? None if unknown."""
-    try:
-        r = s.get(f"https://tonapi.io/v2/dns/{n.lower()}.t.me", timeout=TIMEOUT)
-    except requests.RequestException:
-        return None
-    if r.status_code == 404:
-        return False
-    d = json_or_none(r)
-    if r.status_code == 200 and isinstance(d, dict):
-        return bool(d.get("item") or d.get("name"))
-    return None
-
-
-FRAGMENT_TAKEN = {"taken": "used by an account without a public page",
-                  "available": "collectible username, only sold through Fragment",
-                  "on auction": "collectible username, on auction on Fragment",
-                  "for sale": "collectible username, for sale on Fragment",
-                  "sold": "collectible username, owned by someone"}
-
-
-def check_telegram(s, n):
-    r = s.get(f"https://t.me/{n}", timeout=TIMEOUT)
-    if r.status_code == 429:
-        raise RateLimited(retry_after(r))
-    if "tgme_page_title" in r.text:
-        return TAKEN, ""
-    if not (r.status_code == 200 and "tgme_page" in r.text):
-        return unexpected(r)
-    # No public page. That doesn't mean free: ask Fragment.
-    status = fragment_status(s, n)
-    if status in ("", "unavailable"):
-        # Neither t.me nor Fragment knows an owner, but accounts that hide
-        # their page (e.g. @ledyba) look exactly the same from outside. Only
-        # Telegram's own username screen can tell.
-        return LIKELY, "no public page and not sold on Fragment (hidden accounts can still hold it)"
-    if status:
-        return TAKEN, FRAGMENT_TAKEN.get(status, f"Fragment says: {status}")
-    if ton_collectible(s, n):
-        return TAKEN, FRAGMENT_TAKEN["sold"]
-    return UNKNOWN, "no public page, and Fragment couldn't be checked to confirm"
 
 
 def check_bluesky(s, n):
@@ -799,11 +659,6 @@ def check_twitch(s, n):
         return (TAKEN, "") if d["data"]["user"] else (AVAILABLE, "")
     except (KeyError, TypeError):
         return unexpected(r)
-
-
-def check_soundcloud(s, n):
-    r = s.get(f"https://soundcloud.com/{n}", timeout=TIMEOUT)
-    return by_status(r, available_detail=NO_PROFILE, free=LIKELY)
 
 
 # ---------------------------------------------------------------------------
@@ -1268,19 +1123,15 @@ LINKS = {
     "steam": "https://steamcommunity.com/id/{n}",
     "discord": "https://discord.com/login",
     "chesscom": "https://www.chess.com/member/{n}",
-    "lichess": "https://lichess.org/@/{n}",
     "instagram": "https://www.instagram.com/{n}/",
     "tiktok": "https://www.tiktok.com/@{n}",
     "x": "https://x.com/{n}",
-    "youtube": "https://www.youtube.com/@{n}",
     "snapchat": "https://www.snapchat.com/add/{n}",
-    "telegram": "https://t.me/{n}",
     "bluesky": "https://bsky.app/profile/{n}.bsky.social",
     "github": "https://github.com/{n}",
     "gitlab": "https://gitlab.com/{n}",
     "reddit": "https://www.reddit.com/user/{n}",
     "twitch": "https://www.twitch.tv/{n}",
-    "soundcloud": "https://soundcloud.com/{n}",
 }
 
 
@@ -1308,9 +1159,6 @@ def all_platforms(tlds: List[str]) -> List[Platform]:
         P("chesscom", "Chess.com", "gaming", check_chesscom,
           R(3, 25, "A-Za-z0-9_-", "letters, numbers, _ and -"),
           1.0, ["hikaru", "magnuscarlsen"]),
-        P("lichess", "Lichess", "gaming", check_lichess,
-          R(2, 30, "A-Za-z0-9_-", "letters, numbers, _ and -", (must_start(*LN), must_end(*LN))),
-          1.5, ["thibault", "DrNykterstein"]),
         # socials
         P("instagram", "Instagram", "socials", check_instagram,
           R(1, 30, "A-Za-z0-9._", "letters, numbers, . and _",
@@ -1323,17 +1171,10 @@ def all_platforms(tlds: List[str]) -> List[Platform]:
         P("x", "X / Twitter", "socials", check_x,
           R(4, 15, "A-Za-z0-9_", words, (no_word("twitter", "admin"),)),
           3.0, ["elonmusk", "nasa"]),
-        P("youtube", "YouTube (@handle)", "socials", check_youtube,
-          R(3, 30, "A-Za-z0-9._-", "letters, numbers, ., _ and -"),
-          1.5, ["youtube", "mrbeast"]),
         P("snapchat", "Snapchat", "socials", check_snapchat,
           R(3, 15, "A-Za-z0-9._-", "letters, numbers, ., _ and -",
             (must_start("A-Za-z", "a letter"), must_end(*LN))),
           2.0, ["teamsnapchat", "snapchat"]),
-        P("telegram", "Telegram", "socials", check_telegram,
-          R(5, 32, "A-Za-z0-9_", words,
-            (must_start("A-Za-z", "a letter"), cant_end("_", text="_"))),
-          2.0, ["durov", "telegram"]),
         P("bluesky", "Bluesky (.bsky.social)", "socials", check_bluesky,
           R(3, 18, "a-z0-9-", "letters, numbers and -", (must_start(*LN), must_end(*LN))),
           0.5, ["jay", "pfrazee"], lowercase=True),
@@ -1352,9 +1193,6 @@ def all_platforms(tlds: List[str]) -> List[Platform]:
         P("twitch", "Twitch", "other", check_twitch,
           R(4, 25, "A-Za-z0-9_", words, (cant_start("_", "_"),)),
           1.5, ["ninja", "shroud"]),
-        P("soundcloud", "SoundCloud", "other", check_soundcloud,
-          R(3, 25, "A-Za-z0-9_-", "letters, numbers, _ and -"),
-          1.5, ["skrillex", "soundcloud"]),
     ]
     for p in platforms:
         p.link = LINKS.get(p.key, "")
@@ -3117,7 +2955,7 @@ class UserAtlasWindow:
                                "official registry. ‘Probably free’ (○) means no account was "
                                "found, but the site has no public way to confirm it: banned, "
                                "deleted or private accounts can still hold such a name "
-                               "(TikTok, YouTube, Snapchat, SoundCloud, X and Telegram work this way). "
+                               "(TikTok, Snapchat, Instagram and X work this way). "
                                "Click a platform on the Results page to go straight to its "
                                "page.")).pack(anchor="w")
 
