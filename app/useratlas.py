@@ -85,7 +85,7 @@ FINAL = {AVAILABLE, LIKELY, TAKEN, INVALID}
 FREE = {AVAILABLE, LIKELY}
 # Bump when checks change in a way that makes earlier 'available' results
 # untrustworthy; those are then checked again instead of reused.
-CHECKS_VERSION = "3"
+CHECKS_VERSION = "4"
 TIMEOUT = 15
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
@@ -611,7 +611,10 @@ def check_telegram(s, n):
     # No public page. That doesn't mean free: ask Fragment.
     status = fragment_status(s, n)
     if status in ("", "unavailable"):
-        return AVAILABLE, "nobody has it (checked on Fragment)"
+        # Neither t.me nor Fragment knows an owner, but accounts that hide
+        # their page (e.g. @ledyba) look exactly the same from outside. Only
+        # Telegram's own username screen can tell.
+        return LIKELY, "no public page and not sold on Fragment (hidden accounts can still hold it)"
     if status:
         return TAKEN, FRAGMENT_TAKEN.get(status, f"Fragment says: {status}")
     if ton_collectible(s, n):
@@ -3114,7 +3117,7 @@ class UserAtlasWindow:
                                "official registry. ‘Probably free’ (○) means no account was "
                                "found, but the site has no public way to confirm it: banned, "
                                "deleted or private accounts can still hold such a name "
-                               "(TikTok, YouTube, Snapchat, SoundCloud and X work this way). "
+                               "(TikTok, YouTube, Snapchat, SoundCloud, X and Telegram work this way). "
                                "Click a platform on the Results page to go straight to its "
                                "page.")).pack(anchor="w")
 
