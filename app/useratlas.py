@@ -77,7 +77,15 @@ except ImportError:
 
 
 AVAILABLE, TAKEN, INVALID, UNKNOWN = "available", "taken", "invalid", "unknown"
-FINAL = {AVAILABLE, TAKEN, INVALID}
+# "Probably free": no account was found, but the site has no public way to
+# confirm a name can be claimed (it may be held by a banned, deleted or private
+# account). Only "available" means the site itself confirmed it.
+LIKELY = "probably free"
+FINAL = {AVAILABLE, LIKELY, TAKEN, INVALID}
+FREE = {AVAILABLE, LIKELY}
+# Bump when checks change in a way that makes earlier 'available' results
+# untrustworthy; those are then checked again instead of reused.
+CHECKS_VERSION = "2"
 TIMEOUT = 15
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
@@ -155,12 +163,13 @@ def unexpected(r) -> Result:
     return UNKNOWN, f"unexpected response (HTTP {r.status_code})"
 
 
-def by_status(r, taken=(200,), available=(404,), available_detail="") -> Result:
+def by_status(r, taken=(200,), available=(404,), available_detail="",
+              free=AVAILABLE) -> Result:
     """Common pattern: the HTTP status code says it all."""
     if r.status_code in taken:
         return TAKEN, ""
     if r.status_code in available:
-        return AVAILABLE, available_detail
+        return free, available_detail
     return unexpected(r)
 
 
@@ -411,7 +420,7 @@ def check_instagram(s, n):
                        "Accept": "*/*"},
               allow_redirects=False, timeout=TIMEOUT)
     if r.status_code == 404:
-        return AVAILABLE, NO_PROFILE
+        return LIKELY, NO_PROFILE
     if r.status_code == 200:
         d = json_or_none(r)
         if isinstance(d, dict) and (d.get("data") or {}).get("user"):
@@ -442,7 +451,7 @@ def check_tiktok(s, n):
             if code == 10221:
                 # TikTok keeps the names of banned and deleted accounts, which
                 # look exactly like this; only its edit-profile screen knows.
-                return AVAILABLE, "no profile found (banned or deleted accounts can still hold it)"
+                return LIKELY, "no profile found (banned or deleted accounts can still hold it)"
             if code in (0, 10222) or user.get("uniqueId"):
                 return TAKEN, ""
             return UNKNOWN, f"unknown TikTok code {code}"
@@ -461,6 +470,8 @@ def check_x(s, n):
         reason = d.get("reason", "")
         if reason == "taken":
             return TAKEN, ""
+        if "unavailable" in f"{d.get('msg', '')} {d.get('desc', '')}".lower():
+            return TAKEN, "X keeps this name unavailable"
         return INVALID, shorten(d.get("desc") or reason or "X says this name isn't allowed")
     return unexpected(r)
 
@@ -480,51 +491,15 @@ def check_youtube(s, n):
             return TAKEN, f"reserved by a channel's old URL (youtube.com/{path})"
         if r.status_code not in (404, 410):
             return unexpected(r)
-    return AVAILABLE, "no channel found"
-
-
-SNAP_XSRF = re.compile(r"xsrf_token=([\w-]+)")
-
-
-def snapchat_signup_check(s, n) -> Optional[Result]:
-    """Ask the check Snapchat's own sign-up form does; None if it gives no clear answer."""
-    r = s.get("https://accounts.snapchat.com/accounts/login", timeout=TIMEOUT)
-    token = s.cookies.get("xsrf_token")
-    if not token:
-        m = SNAP_XSRF.search(r.headers.get("Set-Cookie", ""))
-        token = m.group(1) if m else ""
-    if not token:
-        return None
-    r = s.post("https://accounts.snapchat.com/accounts/get_username_suggestions",
-               data={"requested_username": n, "xsrf_token": token},
-               cookies={"xsrf_token": token}, timeout=TIMEOUT)
-    if r.status_code == 429:
-        raise RateLimited(retry_after(r))
-    d = json_or_none(r)
-    value = d.get("value") if isinstance(d, dict) else None
-    if not isinstance(value, dict):
-        return None
-    code = str(value.get("status_code", "")).upper()
-    message = str(value.get("error_message") or "")
-    if code == "OK" and not message:
-        return AVAILABLE, ""
-    if code in ("TAKEN", "DELETED") or re.search(r"taken|unavailable", message, re.I):
-        return TAKEN, "" if code != "DELETED" else "used by a deleted account"
-    if code.startswith(("INVALID", "TOO_")) and message:
-        return INVALID, shorten(message)
-    return None
+    return LIKELY, "no channel found (closed channels can still hold a handle)"
 
 
 def check_snapchat(s, n):
-    try:
-        found = snapchat_signup_check(s, n)
-    except requests.RequestException:
-        found = None
-    if found:
-        return found
-    # Fallback: is there a public profile? (Misses deleted and some private accounts.)
+    # Snapchat's sign-up form only answers a real browser that passes its bot
+    # check, so all we can see is whether a public profile exists.
     r = s.get(f"https://www.snapchat.com/add/{n}", timeout=TIMEOUT)
-    return by_status(r, available_detail=NO_PROFILE)
+    return by_status(r, available_detail="no public profile (private and deleted "
+                                          "accounts can still hold it)", free=LIKELY)
 
 
 # t.me alone can't tell a free name from one in use: accounts without a public
@@ -556,41 +531,47 @@ def _fragment_status(css_class: str, css: str, text: str) -> str:
 
 
 def fragment_status(s, n) -> Optional[str]:
-    """Fragment's status for this name, lowercased ('unavailable', 'taken',
-    'available', 'on auction', 'for sale', 'sold'), or None when Fragment
-    couldn't be read."""
+    """Fragment's status for this name, lowercased ('taken', 'available',
+    'on auction', 'for sale', 'sold', 'unavailable'); '' when Fragment has no
+    page for it (nobody uses it and it isn't sold); None when Fragment couldn't
+    be read."""
     name = n.lower()
-    # 1) The name's own page, whose header shows its status.
+    # 1) The name's own page. Its header shows the status; a name nobody has
+    #    gets no page and is sent to the search page instead.
     try:
         r = s.get(f"https://fragment.com/username/{name}",
                   headers={"X-Requested-With": "XMLHttpRequest",
                            "X-Aj-Referer": f"https://fragment.com/?query={name}",
                            "Accept": "application/json, text/javascript, */*; q=0.01"},
                   allow_redirects=False, timeout=TIMEOUT)
-        html = None if r.status_code in (301, 302, 303, 307, 308) else _fragment_html(r)
+        if r.status_code in (301, 302, 303, 307, 308):
+            if "query=" in r.headers.get("Location", ""):
+                return ""
+        else:
+            d = json_or_none(r)
+            if r.status_code == 200 and isinstance(d, dict) and not d.get("h") \
+                    and "query=" in str(d.get("r", "")):
+                return ""
+            html = _fragment_html(r)
+            for m in FRAGMENT_STATUS.finditer(html or ""):
+                if "tm-section-header-status" in m.group(1):
+                    return _fragment_status(*m.groups())
     except requests.RequestException:
-        html = None
-    if html:
-        for m in FRAGMENT_STATUS.finditer(html):
-            if "tm-section-header-status" in m.group(1):
-                return _fragment_status(*m.groups())
-    # 2) The search page: one row per name, with that name's status.
+        pass
+    # 2) The search page: a row per name that Fragment knows, with its status.
     try:
         r = s.get("https://fragment.com/", params={"query": name}, timeout=TIMEOUT)
         html = _fragment_html(r)
     except requests.RequestException:
         return None
-    if html is None:
+    if not html or "tm-" not in html:
         return None
-    rows = FRAGMENT_ROW.findall(html)
-    for row in rows:
+    for row in FRAGMENT_ROW.findall(html):
         names = re.findall(r'/username/([A-Za-z0-9_]+)|>\s*@([A-Za-z0-9_]+)\s*<', row)
         if any(name == (a or b).lower() for a, b in names):
             m = FRAGMENT_STATUS.search(row)
             return _fragment_status(*m.groups()) if m else None
-    # Fragment's search always lists the exact name it was asked about, so a
-    # page without it is one we can't read (changed layout, bot check).
-    return None
+    return ""  # a real search page without this name: Fragment doesn't know it
 
 
 def ton_collectible(s, n) -> Optional[bool]:
@@ -624,7 +605,7 @@ def check_telegram(s, n):
         return unexpected(r)
     # No public page. That doesn't mean free: ask Fragment.
     status = fragment_status(s, n)
-    if status == "unavailable":
+    if status in ("", "unavailable"):
         return AVAILABLE, "nobody has it (checked on Fragment)"
     if status:
         return TAKEN, FRAGMENT_TAKEN.get(status, f"Fragment says: {status}")
@@ -660,40 +641,26 @@ def check_bluesky(s, n):
     return unexpected(r)
 
 
-GITHUB_SIGNUP_TOKEN = re.compile(
-    r'<auto-check[^>]*src="/signup_check/username"[\s\S]*?data-csrf="true"[^>]*?value="([^"]+)"'
-    r'|<auto-check[^>]*src="/signup_check/username"[\s\S]*?value="([^"]+)"[^>]*data-csrf="true"')
 TAGS = re.compile(r"<[^>]+>")
 
 
 def github_signup_check(s, n) -> Optional[Result]:
     """The check GitHub's sign-up form runs while you type a username. It also
     knows names that are reserved or held by deleted and renamed accounts."""
-    token = getattr(s, "_github_signup_token", "")
-    for attempt in range(2):
-        if not token:
-            r = s.get("https://github.com/signup", timeout=TIMEOUT)
-            m = GITHUB_SIGNUP_TOKEN.search(r.text or "")
-            if not m:
-                return None
-            token = m.group(1) or m.group(2)
-            setattr(s, "_github_signup_token", token)
-        r = s.post("https://github.com/signup_check/username",
-                   data={"value": n, "authenticity_token": token},
-                   headers={"Referer": "https://github.com/signup"}, timeout=TIMEOUT)
-        if r.status_code == 429:
-            raise RateLimited(retry_after(r))
-        if r.status_code == 200:
-            return AVAILABLE, ""
-        if r.status_code == 422:
-            message = " ".join(TAGS.sub(" ", r.text or "").split())
-            if re.search(r"not available|unavailable|already taken|reserved", message, re.I):
-                return TAKEN, ""
-            if message and not re.search(r"token|session", message, re.I):
-                return INVALID, shorten(message)
-        # a stale or rejected token: fetch a fresh one once
-        token = ""
-        setattr(s, "_github_signup_token", "")
+    r = s.get("https://github.com/signup_check_new/username",
+              params={"value": n}, headers={"X-Requested-With": "XMLHttpRequest",
+                                            "Referer": "https://github.com/signup"},
+              timeout=TIMEOUT)
+    if r.status_code == 429:
+        raise RateLimited(retry_after(r))
+    message = " ".join(TAGS.sub(" ", r.text or "").replace("&#39;", "'").split())
+    if r.status_code == 200 and "is available" in message:
+        return AVAILABLE, ""
+    if r.status_code == 422:
+        if re.search(r"not available|unavailable|reserved", message, re.I):
+            return TAKEN, ""
+        if message:
+            return INVALID, shorten(message)
     return None
 
 
@@ -706,7 +673,7 @@ def check_github(s, n):
         return found
     # Fallback: is there a profile? (Misses reserved and formerly used names.)
     r = s.head(f"https://github.com/{n}", allow_redirects=False, timeout=TIMEOUT)
-    return by_status(r, taken=(200, 301, 302), available_detail=NO_PROFILE)
+    return by_status(r, taken=(200, 301, 302), available_detail=NO_PROFILE, free=LIKELY)
 
 
 def check_gitlab(s, n):
@@ -781,7 +748,8 @@ def check_reddit_api(s, n):
         return UNKNOWN, "Reddit refused the API keys (is API access approved yet?)"
     # Fallback: does the profile exist?
     r = s.get(f"https://oauth.reddit.com/user/{n}/about", headers=h, timeout=TIMEOUT)
-    return by_status(r, available_detail="no profile found (deleted names can't be claimed again)")
+    return by_status(r, available_detail="no profile found (deleted names can't be claimed again)",
+                     free=LIKELY)
 
 
 def check_reddit(s, n):
@@ -801,43 +769,33 @@ def check_reddit(s, n):
     r = s.get(f"https://www.reddit.com/user/{n}/about.json", timeout=TIMEOUT)
     if r.status_code in (401, 403):
         return UNKNOWN, "Reddit blocks checks without API keys (add them in Settings)"
-    return by_status(r, available_detail="no profile found (deleted names can't be claimed again)")
+    return by_status(r, available_detail="no profile found (deleted names can't be claimed again)",
+                     free=LIKELY)
 
 
 TWITCH_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"  # twitch.tv's own public client id
 
 
 def check_twitch(s, n):
-    url = "https://gql.twitch.tv/gql"
-    h = {"Client-Id": TWITCH_CLIENT_ID}
-    r = s.post(url, headers=h, timeout=TIMEOUT, json={
-        "query": "query($u:String!){isUsernameAvailable(username:$u)}",
-        "variables": {"u": n}})
+    # Twitch's sign-up availability check needs a browser integrity token, but
+    # the account lookup covers every account, including banned and recently
+    # deleted ones (whose names Twitch doesn't hand out again yet).
+    r = s.post("https://gql.twitch.tv/gql", headers={"Client-Id": TWITCH_CLIENT_ID},
+               timeout=TIMEOUT, json={
+                   "query": "query($u:String!){user(login:$u,lookupType:ALL){id}}",
+                   "variables": {"u": n}})
     if r.status_code == 429:
         raise RateLimited(retry_after(r))
     d = json_or_none(r)
     try:
-        v = d["data"]["isUsernameAvailable"]
-        if v is True:
-            return AVAILABLE, ""
-        if v is False:
-            return TAKEN, ""
-    except (KeyError, TypeError):
-        pass
-    # Fallback: is there an account with this name?
-    r = s.post(url, headers=h, timeout=TIMEOUT, json={
-        "query": "query($u:String!){user(login:$u,lookupType:ALL){id}}",
-        "variables": {"u": n}})
-    d = json_or_none(r)
-    try:
-        return (TAKEN, "") if d["data"]["user"] else (AVAILABLE, NO_PROFILE)
+        return (TAKEN, "") if d["data"]["user"] else (AVAILABLE, "")
     except (KeyError, TypeError):
         return unexpected(r)
 
 
 def check_soundcloud(s, n):
     r = s.get(f"https://soundcloud.com/{n}", timeout=TIMEOUT)
-    return by_status(r, available_detail=NO_PROFILE)
+    return by_status(r, available_detail=NO_PROFILE, free=LIKELY)
 
 
 # ---------------------------------------------------------------------------
@@ -928,7 +886,7 @@ def dns_registered(s, domain: str) -> Optional[Result]:
         return None
     status = d.get("Status")
     if status == 3:  # NXDOMAIN: the name doesn't exist, so it's free
-        return AVAILABLE, "via DNS"
+        return LIKELY, "not in DNS (the registry itself couldn't be asked)"
     if status == 0 and any(a.get("type") == 2 for a in d.get("Answer", [])):
         return TAKEN, "via DNS"  # has NS records -> delegated -> registered
     return None  # anything else is inconclusive; let the caller decide
@@ -1407,8 +1365,10 @@ def all_platforms(tlds: List[str]) -> List[Platform]:
 # Output: colors and storage
 # ---------------------------------------------------------------------------
 
-COLOR = {AVAILABLE: "\033[92m", TAKEN: "\033[91m", INVALID: "\033[90m", UNKNOWN: "\033[93m"}
-SHOWN = {AVAILABLE: "available", TAKEN: "taken", INVALID: "not allowed", UNKNOWN: "unknown"}
+COLOR = {AVAILABLE: "\033[92m", LIKELY: "\033[36m", TAKEN: "\033[91m", INVALID: "\033[90m",
+         UNKNOWN: "\033[93m"}
+SHOWN = {AVAILABLE: "available", LIKELY: "probably free", TAKEN: "taken",
+         INVALID: "not allowed", UNKNOWN: "unknown"}
 RESET = "\033[0m"
 _print_lock = threading.Lock()
 _output: Optional[Callable[[str], None]] = None  # the window catches messages here
@@ -1423,14 +1383,14 @@ def say(text: str = ""):
         print(text, flush=True)
 
 
-def colored(status: str, width: int = 11) -> str:
+def colored(status: str, width: int = 13) -> str:
     return f"{COLOR.get(status, '')}{SHOWN.get(status, status):<{width}}{RESET}"
 
 
 class Store:
     """Writes every result to a CSV right away and remembers earlier runs."""
 
-    FIELDS = ["time", "name", "platform", "status", "detail"]
+    FIELDS = ["time", "name", "platform", "status", "detail", "checks"]
 
     def __init__(self, path: str, fresh: bool, quiet: bool,
                  on_result: Optional[Callable] = None):
@@ -1442,16 +1402,36 @@ class Store:
         self.new = 0
         if os.path.exists(path) and (fresh or os.path.getsize(path) == 0):
             os.remove(path)
+        rows: List[dict] = []
+        outdated = False
         if os.path.exists(path):
             with open(path, newline="", encoding="utf-8-sig") as f:
-                for row in csv.DictReader(f, delimiter=";"):
+                reader = csv.DictReader(f, delimiter=";")
+                outdated = "checks" not in (reader.fieldnames or [])
+                for row in reader:
                     try:
+                        status = row["status"]
+                        # Free results from older, less careful checks are checked again.
+                        if status in FREE and row.get("checks") != CHECKS_VERSION:
+                            outdated = True
+                            continue
                         self.results[(row["name"].lower(), row["platform"])] = (
-                            row["status"], row["detail"])
+                            status, row["detail"])
+                        rows.append(row)
                     except KeyError:
                         continue
+        if os.path.exists(path) and not outdated:
             self.f = open(path, "a", newline="", encoding="utf-8")
             self.writer = csv.writer(self.f, delimiter=";")
+        elif os.path.exists(path):
+            # Rewrite the file without the outdated rows, in the current format.
+            self.f = open(path, "w", newline="", encoding="utf-8-sig")
+            self.writer = csv.writer(self.f, delimiter=";")
+            self.writer.writerow(self.FIELDS)
+            for row in rows:
+                self.writer.writerow([row.get(k) or "" for k in self.FIELDS[:-1]]
+                                     + [row.get("checks") or CHECKS_VERSION])
+            self.f.flush()
         else:
             # utf-8-sig so Excel shows characters correctly; ';' opens straight into columns
             self.f = open(path, "w", newline="", encoding="utf-8-sig")
@@ -1470,11 +1450,11 @@ class Store:
             self.results[(name.lower(), p.key)] = (status, detail)
             self.new += 1
             self.writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                  name, p.key, status, detail])
+                                  name, p.key, status, detail, CHECKS_VERSION])
             self.f.flush()
         if self.on_result is not None:
             self.on_result(name, p.key, status, detail)
-        elif status == AVAILABLE or not self.quiet:
+        elif status in FREE or not self.quiet:
             extra = f"  – {detail}" if detail and status != TAKEN else ""
             say(f"  {colored(status)} {name:<20} {p.title}{extra}")
 
@@ -1564,7 +1544,7 @@ def test_platform(p: Platform, stop: threading.Event) -> Tuple[bool, str]:
         # only try the next known name if this one came back 'available' or 'invalid'
         if taken[0] in (TAKEN, UNKNOWN) or stop.wait(p.delay):
             break
-    if free[0] == AVAILABLE and taken[0] == TAKEN:
+    if free[0] in FREE and taken[0] == TAKEN:
         return True, ""
     for status, detail in (free, taken):
         if status == UNKNOWN:
@@ -1712,7 +1692,7 @@ def summary(rows, platforms: List[Platform]):
     for i, p in enumerate(platforms):
         statuses = [st[i] for _, _, _, st in rows]
         parts = [f"{colored(s, 0)} {statuses.count(s)}"
-                 for s in (AVAILABLE, TAKEN, INVALID, UNKNOWN) if statuses.count(s)]
+                 for s in (AVAILABLE, LIKELY, TAKEN, INVALID, UNKNOWN) if statuses.count(s)]
         say(f"  {p.title:<24} " + ("  ".join(parts) if parts else "not checked"))
 
     everywhere, best = [], []
@@ -1817,6 +1797,7 @@ C = {
 # Status pills in the detail panel: (fill, text, symbol, outline)
 CHIP = {
     AVAILABLE: ("#10302A", "#4ADFA6", "✓", "#1D5545"),
+    LIKELY: ("#142233", "#8CC8E8", "○", "#27425C"),
     TAKEN: ("#361627", "#FF8BA0", "✗", "#5D2541"),
     INVALID: ("#1C1F3B", "#8D90BA", "⊘", "#2E3259"),
     UNKNOWN: ("#382B10", "#FBC64E", "?", "#5E481A"),
@@ -1825,7 +1806,9 @@ CHIP = {
     "": ("#171932", "#6B6E98", "·", "#262A4D"),
 }
 CHIP_TEXT = {
-    AVAILABLE: "available", TAKEN: "taken", INVALID: "not allowed",
+    AVAILABLE: "available (the site confirmed it)",
+    LIKELY: "probably free: no account found, but the site can't confirm it",
+    TAKEN: "taken", INVALID: "not allowed",
     UNKNOWN: "unknown", "waiting": "still checking",
     "skipped": "skipped (failed the self-test)", "": "not checked yet",
 }
@@ -3121,10 +3104,14 @@ class UserAtlasWindow:
 
         box = section(1, "About results")
         flow(1, ttk.Label(box, wraplength=wrap, justify="left",
-                          text="‘Available’ means no account or registration was found. Some "
-                               "names are still blocked or reserved, which you'll only find out "
-                               "when claiming. Click a platform on the Results page to go "
-                               "straight to its page.")).pack(anchor="w")
+                          text="‘Available’ (✓) means the site itself confirmed the name can "
+                               "be taken, through the check its sign-up form uses or the "
+                               "official registry. ‘Probably free’ (○) means no account was "
+                               "found, but the site has no public way to confirm it: banned, "
+                               "deleted or private accounts can still hold such a name "
+                               "(TikTok, YouTube, Snapchat and SoundCloud work this way). "
+                               "Click a platform on the Results page to go straight to its "
+                               "page.")).pack(anchor="w")
 
     # ----- tabs -------------------------------------------------------------
 
@@ -3624,6 +3611,9 @@ class UserAtlasWindow:
     def available_count(self, name, group: Optional[str] = None) -> int:
         return sum(1 for q in self.active_platforms(group) if self.status_of(name, q) == AVAILABLE)
 
+    def likely_count(self, name, group: Optional[str] = None) -> int:
+        return sum(1 for q in self.active_platforms(group) if self.status_of(name, q) == LIKELY)
+
     def available_everywhere(self, name) -> bool:
         """Available on every platform that answered, and every platform has been checked."""
         st = [self.status_of(name, q) for q in self.active_platforms()]
@@ -3676,7 +3666,9 @@ class UserAtlasWindow:
         st = [self.status_of(name, q) for q in platforms]
         if not any(st):
             return "…" if self.busy else "–"
-        return f"{st.count(AVAILABLE)} of {len(platforms)}" + ("" if all(st) else "  …")
+        likely = f" (+{st.count(LIKELY)})" if LIKELY in st else ""
+        return (f"{st.count(AVAILABLE)}{likely} of {len(platforms)}"
+                + ("" if all(st) else "  …"))
 
     def allowed_count(self, name) -> int:
         """Platforms whose rules (and own answer) allow this name."""
@@ -3695,7 +3687,7 @@ class UserAtlasWindow:
             return ()
         if self.available_everywhere(name):
             return ("allavailable",)
-        if AVAILABLE not in st:
+        if not FREE & set(st):
             return ("noneavailable",)
         return ()
 
@@ -3731,7 +3723,8 @@ class UserAtlasWindow:
         term = self.search.get().strip().lower()
         if term and term not in name.lower():
             return False
-        return not (self.only_available.get() and self.available_count(name) == 0)
+        return not (self.only_available.get() and self.available_count(name) == 0
+                    and self.likely_count(name) == 0)
 
     def sort_by(self, col):
         col_s, reverse = self.sorting
@@ -3749,7 +3742,8 @@ class UserAtlasWindow:
                 return name.lower()
             if col == "allowed":
                 return -self.allowed_count(name)
-            return -self.available_count(name, None if col == "available" else col)
+            group = None if col == "available" else col
+            return (-self.available_count(name, group), -self.likely_count(name, group))
 
         self.hidden = set()
         position = 0
@@ -3786,15 +3780,17 @@ class UserAtlasWindow:
         if not name:
             ttk.Label(self.detail, text="Pick a name", style="Heading.TLabel").pack(anchor="w")
             ttk.Label(self.detail, style="Card.Muted.TLabel", wraplength=px(340), justify="left",
-                      text="You'll see on each platform whether it's free. Click a platform "
-                           "to open its page.").pack(anchor="w", pady=(px(6), px(22)))
+                      text="You'll see on each platform whether it's free. ✓ is confirmed by "
+                           "the site, ○ means no account was found but the site can't confirm "
+                           "it. Click a platform to open its page.").pack(anchor="w", pady=(px(6), px(22)))
             grid = ttk.Frame(self.detail, style="Card.TFrame")
             grid.pack(fill="x")
             for c in range(2):
                 grid.columnconfigure(c, weight=1, uniform="legend")
-            for i, (kind, text) in enumerate(((AVAILABLE, "Available"), (TAKEN, "Taken"),
-                                              (INVALID, "Not allowed"), (UNKNOWN, "Unknown"),
-                                              ("waiting", "Checking"), ("skipped", "Skipped"))):
+            for i, (kind, text) in enumerate(((AVAILABLE, "Available"), (LIKELY, "Probably free"),
+                                              (TAKEN, "Taken"), (INVALID, "Not allowed"),
+                                              (UNKNOWN, "Unknown"), ("waiting", "Checking"),
+                                              ("skipped", "Skipped"))):
                 ttk.Label(grid, text=f"{CHIP[kind][2]}  {text}", style=self.pill_styles[kind]).grid(
                     row=i // 2, column=i % 2, sticky="ew", padx=(0, px(8)), pady=(0, px(8)))
             return
@@ -3806,8 +3802,10 @@ class UserAtlasWindow:
                    command=lambda: self.copy(name)).pack(side="right", anchor="n", pady=(px(8), 0))
         active = self.active_platforms()
         waiting = sum(1 for q in active if not self.status_of(name, q))
+        likely = self.likely_count(name)
         ttk.Label(self.detail, text=f"Available on {self.available_count(name)} of "
-                                    f"{len(active)} platforms",
+                                    f"{len(active)} platforms"
+                                    + (f", probably free on {likely} more" if likely else ""),
                   style="Card.Muted.TLabel").pack(anchor="w", pady=(px(2), 0))
         if waiting and self.busy:
             ttk.Label(self.detail, text=f"{waiting} still checking",
@@ -4314,8 +4312,9 @@ def main(argv=None):
 
         summary(rows, platforms)
         say(f"\nEverything is in {args.overview} (overview) and {args.out} (all details).")
-        say("Note: 'available' means no account or registration was found. Some names "
-            "are still blocked or reserved; you'll only find out when claiming.")
+        say("Note: 'available' means the site itself confirmed the name is free. 'Probably "
+            "free' means no account was found, but the site can't confirm it (banned, "
+            "deleted or private accounts may still hold the name).")
         return 0
     except KeyboardInterrupt:
         say("Stopped. Run the same command again to continue.")
