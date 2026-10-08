@@ -819,6 +819,7 @@ class Blocklist:
 
     def __init__(self, terms=(), safe_words=()):
         self.safe = set(safe_words)
+        self._cache: Dict[str, bool] = {}   # blocked() is pure; memoize it
         self.terms = []
         for e in terms:
             sev = e.get("severity", 3)
@@ -860,6 +861,13 @@ class Blocklist:
     def blocked(self, name: str) -> bool:
         if not self.terms:
             return False
+        hit = self._cache.get(name)
+        if hit is not None:
+            return hit
+        self._cache[name] = hit = self._blocked(name)
+        return hit
+
+    def _blocked(self, name: str) -> bool:
         forms = self._forms(name)
         tokens = self._tokens(name)
         safe_token = bool(tokens & self.safe)
@@ -1760,6 +1768,10 @@ class UserAtlasWindow:
         self.current_tab = ""
         self.hidden: set = set()
         self.everything = all_platforms([])
+        # Caches + batched rendering so a bulk run doesn't freeze the UI:
+        self._active_cache: Optional[List[Platform]] = None
+        self._problem_cache: Dict[Tuple[str, str], bool] = {}
+        self.dirty: set = set()          # names whose row needs redrawing
 
         global _output
         _output = lambda t: self.events.put(("log", t))
@@ -2625,6 +2637,9 @@ class UserAtlasWindow:
         self.total = sum(self.remaining.values())
         selftest = self.selftest_on.get()
         self.set_busy(True, "selftest" if selftest else "checking")
+        if len(names) > 500:
+            self.status.set(f"Preparing {len(names)} names…")
+            self.root.update_idletasks()
         self.build_table(names, platforms)
         self.show()
         self.show_detail(None)
@@ -2730,11 +2745,12 @@ class UserAtlasWindow:
 
     def process(self):
         try:
-            for _ in range(500):
+            for _ in range(2000):
                 message = self.events.get_nowait()
                 getattr(self, "on_" + message[0])(*message[1:])
         except queue.Empty:
             pass
+        self.flush_dirty()
         if self.refresh_detail:
             self.refresh_detail = False
             self.show_detail(self.selected)
@@ -2757,8 +2773,9 @@ class UserAtlasWindow:
         if self.remaining.get(key, 0) > 0:
             self.remaining[key] -= 1
         self.done_count += 1
-        self.progress["value"] = self.done_count
-        self.update_row(name)
+        # Don't redraw here — a bulk run would redraw each row P times. Mark the
+        # row dirty and let process() flush it once per tick (see flush_dirty).
+        self.dirty.add(name)
         if self.selected and name.lower() == self.selected.lower():
             self.refresh_detail = True
 
@@ -2777,8 +2794,8 @@ class UserAtlasWindow:
             self.skipped.add(key)
             self.total -= self.remaining[key]
             self.remaining[key] = 0
-            for name in self.names:
-                self.update_row(name)
+            self.invalidate_active()          # skipped set changed
+            self.dirty.update(self.names)     # every row's denominator shifts
             self.refresh_detail = True
 
     def on_checks_started(self, platform_count):
@@ -2824,8 +2841,25 @@ class UserAtlasWindow:
     # ----- results ----------------------------------------------------------
 
     def active_platforms(self, group: Optional[str] = None) -> List[Platform]:
-        return [q for q in self.platforms if q.key not in self.skipped
-                and (group is None or q.group == group)]
+        if self._active_cache is None:
+            self._active_cache = [q for q in self.platforms if q.key not in self.skipped]
+        if group is None:
+            return self._active_cache
+        return [q for q in self._active_cache if q.group == group]
+
+    def invalidate_active(self):
+        self._active_cache = None
+
+    def problem_for(self, name, q) -> bool:
+        """Cached bool(q.problem(name)). problem() runs the blocked-word filter
+        and rule checks, which are static for a run — caching keeps them out of
+        the per-result render path that a bulk run hammers."""
+        k = (name.lower(), q.key)
+        v = self._problem_cache.get(k)
+        if v is None:
+            v = bool(q.problem(name))
+            self._problem_cache[k] = v
+        return v
 
     def status_of(self, name, q) -> str:
         return self.results.get((name.lower(), q.key), ("", ""))[0]
@@ -2844,6 +2878,9 @@ class UserAtlasWindow:
         cols = ["name", "available", "allowed"] + self.groups
         self.table.delete(*self.table.get_children())
         self.hidden = set()
+        self._problem_cache = {}     # fresh run: names/platforms may have changed
+        self.invalidate_active()
+        self.dirty = set()
         self.table.configure(columns=cols, displaycolumns=cols)
         self.headings = {"name": "NAME", "available": "AVAILABLE", "allowed": "ALLOWED"}
         self.table.column("name", width=180, minwidth=110, stretch=True, anchor="w")
@@ -2883,7 +2920,7 @@ class UserAtlasWindow:
     def allowed_count(self, name) -> int:
         """Platforms whose rules (and own answer) allow this name."""
         return sum(1 for q in self.active_platforms()
-                   if self.status_of(name, q) != INVALID and not q.problem(name))
+                   if self.status_of(name, q) != INVALID and not self.problem_for(name, q))
 
     def row_values(self, name):
         active = self.active_platforms()
@@ -2911,6 +2948,20 @@ class UserAtlasWindow:
 
     def refresh_rows(self):
         for name in self.names:
+            self.update_row(name)
+
+    def flush_dirty(self):
+        """Redraw the rows that changed since the last tick, in one batch, and
+        advance the progress bar. Keeps a big run from freezing the UI."""
+        if self.busy and self.phase == "checking":
+            try:
+                self.progress["value"] = self.done_count
+            except tk.TclError:
+                pass
+        if not self.dirty:
+            return
+        names, self.dirty = self.dirty, set()
+        for name in names:
             self.update_row(name)
 
     def visible(self, name) -> bool:
