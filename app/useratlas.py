@@ -1539,34 +1539,55 @@ GROUP_HINTS = {
     "domains": "Websites, via the domain registry",
 }
 
-# Colors: black and purple
+# Colors: "night atlas". Layered deep-indigo surfaces (sidebar darkest, then the
+# page, then raised panels). Violet only marks the current selection and the main
+# action; mint, coral and amber carry what the results mean.
 C = {
-    "bg": "#09090D", "surface": "#101016", "card": "#14141C", "field": "#0D0D13",
-    "border": "#23232F", "line": "#1C1C26", "hover": "#1B1B25",
-    "text": "#ECECF3", "muted": "#9A9AB2", "faint": "#5F5F75",
-    "accent": "#8B5CF6", "accent_dark": "#7C3AED", "accent_soft": "#211A38",
-    "accent_text": "#C4B5FD", "accent_off": "#3A305C",
-    "red": "#F87171", "red_soft": "#2A1418", "red_border": "#4A1D25",
-    "green": "#4ADE80", "amber": "#FBBF24", "amber_soft": "#33270C",
-    "row_free": "#0F2419", "selected": "#2A2145",
+    "bg": "#0F1020", "surface": "#0A0B17", "side_hover": "#161833",
+    "card": "#161830", "panel_line": "#24274A", "field": "#1C1F3B",
+    "hover": "#21244A", "border": "#2E3259", "border_hover": "#454A80",
+    "line": "#222545",
+    "text": "#ECEBFA", "muted": "#A0A2C8", "faint": "#6B6E98",
+    "accent": "#8B5CF6", "accent_dark": "#7A4AEE", "accent_press": "#6A3BDD",
+    "accent_soft": "#2A2359", "accent_text": "#BDA9FF", "accent_off": "#353064",
+    "red": "#FB7185", "red_soft": "#33172A", "red_border": "#5A2340",
+    "green": "#34D399", "amber": "#FBBF24", "amber_soft": "#3A2C10",
+    "row_free": "#11292B", "selected": "#2B2559",
 }
-# Labels per platform in the detail panel: (background, text, symbol)
+# Status pills in the detail panel: (fill, text, symbol, outline)
 CHIP = {
-    AVAILABLE: ("#0F2A1C", "#4ADE80", "✓"),
-    TAKEN: ("#2C1418", "#F87171", "✗"),
-    INVALID: ("#1E1A26", "#A1A1B5", "⊘"),
-    UNKNOWN: ("#2E240C", "#FBBF24", "?"),
-    "waiting": ("#211A38", "#A78BFA", "…"),
-    "skipped": ("#17171F", "#5F5F75", "–"),
-    "": ("#15151D", "#5F5F75", "·"),
+    AVAILABLE: ("#10302A", "#4ADFA6", "✓", "#1D5545"),
+    TAKEN: ("#361627", "#FF8BA0", "✗", "#5D2541"),
+    INVALID: ("#1C1F3B", "#8D90BA", "⊘", "#2E3259"),
+    UNKNOWN: ("#382B10", "#FBC64E", "?", "#5E481A"),
+    "waiting": ("#272157", "#BBA6FF", "…", "#3F358A"),
+    "skipped": ("#171932", "#6B6E98", "–", "#262A4D"),
+    "": ("#171932", "#6B6E98", "·", "#262A4D"),
 }
 CHIP_TEXT = {
     AVAILABLE: "available", TAKEN: "taken", INVALID: "not allowed",
     UNKNOWN: "unknown", "waiting": "still checking",
     "skipped": "skipped (failed the self-test)", "": "not checked yet",
 }
-SELFTEST_TEXT = {"works": "✓  works", "not working": "⚠  not working right now",
-                 "busy": "…  testing", "": "not tested"}
+SELFTEST_TEXT = {"works": "Works", "not working": "Not working right now",
+                 "busy": "Testing…", "": "Not tested"}
+
+
+def pick_family(root, candidates, fallback):
+    """The first installed font family out of `candidates`, else `fallback`."""
+    try:
+        have = {str(f).lower(): str(f) for f in tkfont.families(root)}
+    except tk.TclError:
+        return fallback
+    for name in candidates:
+        if name.lower() in have:
+            return have[name.lower()]
+    return fallback
+
+
+def blend(a: str, b: str, t: float) -> str:
+    """Mix two #rrggbb colors: t=0 gives a, t=1 gives b."""
+    return "#%02x%02x%02x" % tuple(round(x + (y - x) * t) for x, y in zip(_rgb(a), _rgb(b)))
 
 
 def ensure_requests() -> bool:
@@ -1662,12 +1683,12 @@ def _rounded_square_distance(px, py, n, r) -> float:
     return math.hypot(max(qx, 0), max(qy, 0)) + min(max(qx, qy), 0) - r
 
 
-def _paint(master, n: int, paint) -> "tk.PhotoImage":
-    image = tk.PhotoImage(master=master, width=n, height=n)
+def _paint_wh(master, w: int, h: int, paint) -> "tk.PhotoImage":
+    image = tk.PhotoImage(master=master, width=w, height=h)
     rows = []
-    for y in range(n):
+    for y in range(h):
         row = []
-        for x in range(n):
+        for x in range(w):
             total = [0, 0, 0]
             for sy in range(4):
                 for sx in range(4):
@@ -1679,6 +1700,10 @@ def _paint(master, n: int, paint) -> "tk.PhotoImage":
         rows.append("{" + " ".join(row) + "}")
     image.put(" ".join(rows))
     return image
+
+
+def _paint(master, n: int, paint) -> "tk.PhotoImage":
+    return _paint_wh(master, n, n, paint)
 
 
 def draw_checkbox(master, n: int, background: str, fill: str, border: str,
@@ -1716,23 +1741,90 @@ def draw_radio(master, n: int, background: str, fill: str, border: str, dot: Opt
     return _paint(master, n, paint)
 
 
-class Card:
-    """Dark card with a thin border, optional title and hint."""
+def _rrect_distance(px, py, w, h, r) -> float:
+    """Signed distance to a w×h rectangle with corner radius r (negative inside)."""
+    qx = abs(px - w / 2) - (w / 2 - r)
+    qy = abs(py - h / 2) - (h / 2 - r)
+    return math.hypot(max(qx, 0.0), max(qy, 0.0)) + min(max(qx, qy), 0.0) - r
 
-    def __init__(self, parent, title=None, hint=None, wrap=520, padding=(20, 16)):
-        self.outer = tk.Frame(parent, bg=C["card"], highlightthickness=1,
-                              highlightbackground=C["border"], highlightcolor=C["border"])
-        inner = ttk.Frame(self.outer, style="Card.TFrame", padding=padding)
-        inner.pack(fill="both", expand=True)
-        self.head = ttk.Frame(inner, style="Card.TFrame")
+
+def paint_rounded(master, w, h, r, fill, background, border=None, border_width=1.0):
+    """An anti-aliased rounded rectangle on a solid background, as a PhotoImage.
+
+    Kept tiny and used as a 9-slice ttk image element, so one small image
+    stretches to any button, field or panel size without new dependencies."""
+    bg, fc = _rgb(background), _rgb(fill)
+    bc = _rgb(border) if border else fc
+    image = tk.PhotoImage(master=master, width=w, height=h)
+    rows = []
+    for y in range(h):
+        row = []
+        for x in range(w):
+            d = _rrect_distance(x + 0.5, y + 0.5, w, h, r)
+            outer = min(1.0, max(0.0, 0.5 - d))
+            inner = min(1.0, max(0.0, 0.5 - d - border_width)) if border else outer
+            row.append("#%02x%02x%02x" % tuple(
+                round(bg[i] * (1 - outer) + bc[i] * (outer - inner) + fc[i] * inner)
+                for i in range(3)))
+        rows.append("{" + " ".join(row) + "}")
+    image.put(" ".join(rows))
+    return image
+
+
+def widen(master, small, border: int, center: int) -> "tk.PhotoImage":
+    """Grow a 9-slice image's 1-pixel middle to `center` pixels.
+
+    Tk fills the stretchable middle of an image element by redrawing it tile by
+    tile; a 1-pixel tile means one redraw per pixel of a panel, which makes big
+    windows crawl. The copy below runs in Tk's C code, so it costs nothing."""
+    n, b = small.width(), border
+    m, size = n - 2 * b, 2 * b + center
+    big = tk.PhotoImage(master=master, width=size, height=size)
+    call, e = big.tk.call, size - b
+    for sx, dx in ((0, 0), (n - b, e)):
+        for sy, dy in ((0, 0), (n - b, e)):
+            call(big, "copy", small, "-from", sx, sy, sx + b, sy + b, "-to", dx, dy)
+    call(big, "copy", small, "-from", b, 0, b + m, b, "-to", b, 0, e, b)            # top
+    call(big, "copy", small, "-from", b, n - b, b + m, n, "-to", b, e, e, size)     # bottom
+    call(big, "copy", small, "-from", 0, b, b, b + m, "-to", 0, b, b, e)            # left
+    call(big, "copy", small, "-from", n - b, b, n, b + m, "-to", e, b, size, e)     # right
+    call(big, "copy", small, "-from", b, b, b + m, b + m, "-to", b, b, e, e)        # middle
+    return big
+
+
+def paint_tick(master, w: int, h: int, background: str, color: str) -> "tk.PhotoImage":
+    """A small check mark, centered in w×h (marks a selected platform chip)."""
+    bg, cc = _rgb(background), _rgb(color)
+    dx = (w - 0.96 * h) / 2
+    p = [(dx + 0.08 * h, 0.52 * h), (dx + 0.36 * h, 0.78 * h), (dx + 0.88 * h, 0.24 * h)]
+    half = max(0.9, h * 0.075)
+
+    def paint(px, py):
+        d = min(_segment_distance(px, py, *p[0], *p[1]), _segment_distance(px, py, *p[1], *p[2]))
+        return cc if d <= half else bg
+
+    return _paint_wh(master, w, h, paint)
+
+
+class Card:
+    """A rounded panel with an optional title row (extra controls go in .head)."""
+    k = 1.0  # UI scale, set by the window's style()
+
+    def __init__(self, parent, title=None, hint=None, wrap=520, padding=(24, 20)):
+        k = Card.k
+        self.outer = ttk.Frame(parent, style="Panel.TFrame",
+                               padding=tuple(int(round(v * k)) for v in padding))
+        self.head = ttk.Frame(self.outer, style="Card.TFrame")
         if title:
             self.head.pack(fill="x")
             ttk.Label(self.head, text=title, style="Heading.TLabel").pack(side="left")
         if hint:
-            ttk.Label(inner, text=hint, style="Card.Muted.TLabel", wraplength=wrap,
-                      justify="left").pack(anchor="w", pady=(3, 0))
-        self.body = ttk.Frame(inner, style="Card.TFrame")
-        self.body.pack(fill="both", expand=True, pady=(14 if (title or hint) else 0, 0))
+            ttk.Label(self.outer, text=hint, style="Card.Muted.TLabel",
+                      wraplength=int(wrap * k), justify="left").pack(anchor="w",
+                                                                     pady=(int(5 * k), 0))
+        self.body = ttk.Frame(self.outer, style="Card.TFrame")
+        self.body.pack(fill="both", expand=True,
+                       pady=(int(18 * k) if (title or hint) else 0, 0))
 
 
 class UserAtlasWindow:
@@ -1776,13 +1868,13 @@ class UserAtlasWindow:
         global _output
         _output = lambda t: self.events.put(("log", t))
 
+        self.settings_path = os.path.join(self.folder, "settings.json")
         self.style()
         self.build()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.bind("<Control-Return>", lambda e: self.start())
         for i, (key, _) in enumerate(self.TABS, 1):
             self.root.bind(f"<Control-Key-{i}>", lambda e, k=key: self.show_tab(k))
-        self.settings_path = os.path.join(self.folder, "settings.json")
         self.load_settings()
         self.show_tab("names")
         self.update_summary()
@@ -1802,148 +1894,292 @@ class UserAtlasWindow:
     # ----- style ------------------------------------------------------------
 
     def style(self):
-        base = tkfont.nametofont("TkDefaultFont")
-        family = base.actual()["family"]
-        size = max(10, abs(int(base.actual()["size"])) or 10)
-        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
+        root = self.root
+        try:
+            scaling = float(root.tk.call("tk", "scaling"))  # pixels per point
+        except (tk.TclError, ValueError):
+            scaling = 4 / 3
+        k = self.k = Card.k = max(1.0, scaling / (4 / 3))
+
+        def px(v):
+            return max(1, int(round(v * k)))
+        self.px = px
+
+        # Type: the platform's own modern UI face, with a real semibold for titles.
+        system = tkfont.nametofont("TkDefaultFont").actual()["family"]
+        if sys.platform == "darwin":
+            text_family = display_family = system
+            semi_text = semi_display = None
+        else:
+            text_family = pick_family(root, ("Segoe UI Variable Text", "Segoe UI", "Inter",
+                                             "Cantarell", "Noto Sans", "DejaVu Sans"), system)
+            display_family = pick_family(root, ("Segoe UI Variable Display", "Segoe UI",
+                                                "Inter Display", "Inter"), text_family)
+            semi_text = pick_family(root, ("Segoe UI Variable Text Semibold",
+                                           "Segoe UI Variable Text Semib", "Segoe UI Semibold",
+                                           "Inter SemiBold"), None)
+            semi_display = pick_family(root, ("Segoe UI Variable Display Semibold",
+                                              "Segoe UI Variable Display Semib",
+                                              "Segoe UI Semibold", "Inter Display SemiBold",
+                                              "Inter SemiBold"), semi_text)
+
+        def font(size, semibold=False, display=False, *extra):
+            family = display_family if display else text_family
+            if semibold:
+                semi = semi_display if display else semi_text
+                if semi:
+                    return (semi, -px(size)) + extra
+                return (family, -px(size), "bold") + extra
+            return (family, -px(size)) + extra
+
+        self.f = {
+            "normal": font(14), "small": font(13), "bold": font(14, True),
+            "small_bold": font(13, True), "nav": font(14, True),
+            "heading": font(16, True, True), "title": font(27, True, True),
+            "big": font(28, True, True), "brand": font(18, True, True),
+            "small_strike": font(13, False, False, "overstrike"),
+        }
+        for name, spec in (("TkDefaultFont", self.f["normal"]), ("TkTextFont", self.f["normal"]),
+                           ("TkMenuFont", self.f["normal"]),
+                           ("TkHeadingFont", self.f["small_bold"])):
             try:
-                tkfont.nametofont(name).configure(family=family, size=size)
+                tkfont.nametofont(name).configure(
+                    family=spec[0], size=spec[1],
+                    weight="bold" if "bold" in spec[2:] else "normal")
             except tk.TclError:
                 pass
-        self.f = {
-            "normal": (family, size), "bold": (family, size, "bold"), "small": (family, size - 1),
-            "small_bold": (family, size - 1, "bold"), "heading": (family, size + 2, "bold"),
-            "title": (family, size + 6, "bold"), "big": (family, size + 8, "bold"),
-            "small_strike": (family, size - 1, "overstrike"),
-        }
-        s = ttk.Style(self.root)
+
+        s = ttk.Style(root)
         try:
             s.theme_use("clam")
         except tk.TclError:
             pass
-        self.root.configure(background=C["bg"])
-        self.root.option_add("*TCombobox*Listbox.background", C["field"])
+        root.configure(background=C["bg"])
+        root.option_add("*TCombobox*Listbox.background", C["field"])
         s.configure(".", background=C["bg"], foreground=C["text"], font=self.f["normal"],
                     bordercolor=C["border"], lightcolor=C["card"], darkcolor=C["card"],
                     troughcolor=C["line"], focuscolor=C["accent"],
-                    selectbackground=C["selected"], selectforeground=C["text"],
+                    selectbackground=C["selected"], selectforeground="#FFFFFF",
                     insertcolor=C["text"], fieldbackground=C["field"])
+
+        # Text on each surface: the page, a panel ("Card.") and the sidebar ("Bar.")
         for prefix, bg in (("", C["bg"]), ("Card.", C["card"]), ("Bar.", C["surface"])):
             s.configure(f"{prefix}TFrame", background=bg)
             s.configure(f"{prefix}TLabel", background=bg, foreground=C["text"])
             s.configure(f"{prefix}Muted.TLabel", background=bg, foreground=C["muted"],
                         font=self.f["small"])
+        s.configure("PageTitle.TLabel", background=C["bg"], font=self.f["title"])
+        s.configure("PageDesc.TLabel", background=C["bg"], foreground=C["muted"])
+        s.configure("SectionTitle.TLabel", background=C["bg"], font=self.f["heading"])
+        s.configure("Page.TLabel", background=C["bg"], foreground=C["muted"],
+                    font=self.f["small"])
+        s.configure("PageCounter.TLabel", background=C["bg"], foreground=C["muted"],
+                    font=self.f["small"])
+        s.configure("Strong.TLabel", background=C["bg"], font=self.f["bold"])
         s.configure("Heading.TLabel", background=C["card"], font=self.f["heading"])
-        s.configure("Page.TLabel", background=C["bg"], font=self.f["heading"])
-        s.configure("Title.TLabel", background=C["surface"], font=self.f["title"])
         s.configure("Big.TLabel", background=C["card"], font=self.f["big"])
-        s.configure("Counter.TLabel", background=C["card"], foreground=C["accent_text"],
+        s.configure("Counter.TLabel", background=C["card"], foreground=C["muted"],
+                    font=self.f["small"])
+        s.configure("Section.TLabel", background=C["card"], foreground=C["muted"],
                     font=self.f["small_bold"])
-        s.configure("Section.TLabel", background=C["card"], foreground=C["faint"],
-                    font=self.f["small_bold"])
+        s.configure("SearchHint.TLabel", background=C["field"], foreground=C["faint"])
+
+        # ---- Rounded shapes: tiny anti-aliased images used as 9-slice elements ----
+        self.images = []
+
+        def rr(r, fill, bg, border=None):
+            n = 2 * r + 3
+            image = widen(root, paint_rounded(root, n, n, r, fill, bg, border), r + 1, px(48))
+            self.images.append(image)
+            return image
+
+        def element(name, r, default, *states):
+            # width/height/padding keep the (enlarged) image from setting the
+            # element's minimum size; the style's own padding sizes the widget.
+            try:
+                s.element_create(name, "image", default, *states, border=r + 1, sticky="nsew",
+                                 padding=0, width=2 * (r + 1), height=2 * (r + 1))
+            except tk.TclError:
+                pass  # already made (a second window in the same session)
+
+        def boxed(style_name, el, inner):
+            s.layout(style_name, [(el, {"sticky": "nsew", "children": inner})])
+
+        r_panel, r_ctrl, r_pill = px(14), px(9), px(8)
+
+        # Panels, and the frames around multi-line text fields
+        element("Panel.bg", r_panel, rr(r_panel, C["card"], C["bg"], C["panel_line"]))
+        s.layout("Panel.TFrame", [("Panel.bg", {"sticky": "nsew"})])
+        s.configure("Panel.TFrame", background=C["card"])
+        for name, bg in (("Field", C["card"]), ("PageField", C["bg"])):
+            element(f"{name}.bg", r_ctrl, rr(r_ctrl, C["field"], bg, C["border"]),
+                    ("focus", rr(r_ctrl, C["field"], bg, C["accent"])))
+            s.layout(f"{name}.TFrame", [(f"{name}.bg", {"sticky": "nsew"})])
+            s.configure(f"{name}.TFrame", background=C["field"])
 
         # Buttons
-        s.configure("TButton", background=C["card"], foreground=C["text"],
-                    bordercolor="#2E2E3D", lightcolor=C["card"], darkcolor=C["card"],
-                    padding=(14, 7), relief="solid", borderwidth=1, focusthickness=0,
-                    focuscolor=C["card"])
-        s.map("TButton",
-              background=[("disabled", C["card"]), ("pressed", C["line"]), ("active", C["hover"])],
-              bordercolor=[("disabled", C["border"]), ("active", "#3F3F52")],
-              lightcolor=[("disabled", C["card"]), ("pressed", C["line"]), ("active", C["hover"])],
-              darkcolor=[("disabled", C["card"]), ("pressed", C["line"]), ("active", C["hover"])],
-              foreground=[("disabled", C["faint"])])
-        s.configure("Accent.TButton", background=C["accent"], foreground="#FFFFFF",
-                    bordercolor=C["accent"], lightcolor=C["accent"], darkcolor=C["accent"],
-                    font=self.f["bold"], padding=(20, 8))
-        s.map("Accent.TButton",
-              background=[("disabled", C["accent_off"]), ("pressed", C["accent_dark"]),
-                          ("active", C["accent_dark"])],
-              bordercolor=[("disabled", C["accent_off"]), ("active", C["accent_dark"])],
-              lightcolor=[("disabled", C["accent_off"]), ("active", C["accent_dark"])],
-              darkcolor=[("disabled", C["accent_off"]), ("active", C["accent_dark"])],
-              foreground=[("disabled", "#9C93BD")])
-        s.configure("Stop.TButton", foreground=C["red"], background=C["red_soft"],
-                    bordercolor=C["red_border"], lightcolor=C["red_soft"],
-                    darkcolor=C["red_soft"], font=self.f["bold"], padding=(18, 8))
-        s.map("Stop.TButton",
-              foreground=[("disabled", C["faint"])],
-              background=[("disabled", C["surface"]), ("active", "#3A1A20")],
-              bordercolor=[("disabled", C["border"]), ("active", "#6B2632")],
-              lightcolor=[("disabled", C["surface"]), ("active", "#3A1A20")],
-              darkcolor=[("disabled", C["surface"]), ("active", "#3A1A20")])
-        s.configure("Link.TButton", background=C["card"], foreground=C["accent_text"],
-                    bordercolor=C["card"], lightcolor=C["card"], darkcolor=C["card"],
-                    relief="flat", padding=(2, 1), width=0, font=self.f["small_bold"])
-        s.map("Link.TButton",
-              foreground=[("disabled", C["faint"]), ("active", "#DDD6FE")],
-              background=[("active", C["card"]), ("pressed", C["card"])],
-              bordercolor=[("active", C["card"])], lightcolor=[("active", C["card"])],
-              darkcolor=[("active", C["card"])])
+        label_inner = [("Button.padding", {"sticky": "nsew", "children": [
+            ("Button.label", {"sticky": "nsew"})]})]
+
+        def button(style_name, bg, fill, hover, press, border, fg, fg_off, fill_off,
+                   border_hover=None, pad=(15, 8)):
+            el = style_name.replace(".", "") + ".bg"
+            edge = border_hover or border
+            element(el, r_ctrl, rr(r_ctrl, fill, bg, border),
+                    ("disabled", rr(r_ctrl, fill_off, bg, fill_off)),
+                    ("pressed", rr(r_ctrl, press, bg, edge)),
+                    ("active", rr(r_ctrl, hover, bg, edge)),
+                    ("focus", rr(r_ctrl, fill, bg, C["accent"])))
+            boxed(style_name, el, label_inner)
+            s.configure(style_name, background=bg, foreground=fg, font=self.f["bold"],
+                        padding=(px(pad[0]), px(pad[1])), anchor="center", focusthickness=0)
+            s.map(style_name, foreground=[("disabled", fg_off)],
+                  background=[("active", bg), ("pressed", bg)])
+
+        for name, bg in (("TButton", C["card"]), ("Page.TButton", C["bg"])):
+            button(name, bg, C["field"], C["hover"], C["line"], C["border"], C["text"],
+                   C["faint"], bg, C["border_hover"])
+        button("Accent.TButton", C["surface"], C["accent"], C["accent_dark"], C["accent_press"],
+               C["accent"], "#FFFFFF", "#8F88BC", C["accent_off"], C["accent_dark"], pad=(18, 11))
+        button("Stop.TButton", C["surface"], C["red_soft"], "#43192F", "#4F1D37", C["red_border"],
+               C["red"], C["faint"], C["surface"], "#7A2C4C", pad=(18, 11))
+        for name, bg in (("Link.TButton", C["card"]), ("Page.Link.TButton", C["bg"])):
+            s.layout(name, [("Button.border", {"sticky": "nswe", "border": "1",
+                                               "children": label_inner})])
+            s.configure(name, background=bg, foreground=C["accent_text"], bordercolor=bg,
+                        lightcolor=bg, darkcolor=bg, relief="flat", padding=(px(2), px(1)),
+                        width=0, font=self.f["small_bold"], focusthickness=0)
+            s.map(name, foreground=[("disabled", C["faint"]), ("active", "#E6DEFF")],
+                  background=[("active", bg), ("pressed", bg)], bordercolor=[("active", bg)],
+                  lightcolor=[("active", bg)], darkcolor=[("active", bg)])
+
+        # One-line entry fields
+        for name, bg in (("TEntry", C["card"]), ("Page.TEntry", C["bg"])):
+            el = name.replace(".", "") + ".bg"
+            element(el, r_ctrl, rr(r_ctrl, C["field"], bg, C["border"]),
+                    ("readonly", rr(r_ctrl, C["field"], bg, C["line"])),
+                    ("focus", rr(r_ctrl, C["field"], bg, C["accent"])))
+            boxed(name, el, [("Entry.padding", {"sticky": "nsew", "children": [
+                ("Entry.textarea", {"sticky": "nsew"})]})])
+            s.configure(name, background=bg, foreground=C["text"], fieldbackground=C["field"],
+                        insertcolor=C["text"], padding=(px(12), px(8)),
+                        selectbackground=C["selected"], selectforeground="#FFFFFF")
+            s.map(name, foreground=[("readonly", C["muted"])])
+
+        # Platform chips: outlined when off, violet with a tick when picked
+        # (both images the same size: an image element is sized by its default image)
+        tick_w, tick_h = px(16), px(14)
+        tick = paint_tick(root, tick_w, tick_h, C["accent_soft"], C["accent_text"])
+        blank = tk.PhotoImage(master=root, width=tick_w, height=tick_h)
+        blank.put(C["field"], to=(0, 0, tick_w, tick_h))
+        self.images += [tick, blank]
+        try:
+            s.element_create("Chip.check", "image", blank, ("selected", tick), sticky="")
+        except tk.TclError:
+            pass
+        element("Chip.bg", r_ctrl, rr(r_ctrl, C["field"], C["bg"], C["border"]),
+                ("selected", "active", rr(r_ctrl, C["accent_soft"], C["bg"], C["accent_text"])),
+                ("selected", rr(r_ctrl, C["accent_soft"], C["bg"], C["accent"])),
+                ("active", rr(r_ctrl, C["field"], C["bg"], C["border_hover"])))
+        boxed("Chip.TCheckbutton", "Chip.bg", [("Checkbutton.padding", {
+            "sticky": "nsew", "children": [
+                ("Chip.check", {"side": "right", "sticky": ""}),
+                ("Checkbutton.label", {"side": "left", "sticky": "w"})]})])
+        s.configure("Chip.TCheckbutton", background=C["bg"], foreground=C["muted"],
+                    padding=(px(13), px(10)), focusthickness=0)
+        s.map("Chip.TCheckbutton", foreground=[("selected", "#F2EEFF"), ("active", C["text"])],
+              background=[("active", C["bg"])])
+
+        # Status pills in the detail panel, one style per kind of result
+        self.pill_styles = {}
+        for i, (kind, (fill, fg, _symbol, outline)) in enumerate(CHIP.items()):
+            el = f"Pill{i}.bg"
+            element(el, r_pill, rr(r_pill, fill, C["card"], outline),
+                    ("active", rr(r_pill, fill, C["card"], blend(outline, fg, 0.55))))
+            name = f"Pill{i}.TLabel"
+            boxed(name, el, [("Label.padding", {"sticky": "nsew", "children": [
+                ("Label.label", {"sticky": "w"})]})])
+            s.configure(name, background=fill, foreground=fg, padding=(px(11), px(7)),
+                        font=self.f["small_strike"] if kind == INVALID else self.f["small"])
+            self.pill_styles[kind] = name
+
+        # Sidebar pages: a soft pill on hover, violet for the page you're on
+        element("Nav.bg", r_ctrl, rr(r_ctrl, C["surface"], C["surface"]),
+                ("selected", rr(r_ctrl, C["accent_soft"], C["surface"])),
+                ("active", rr(r_ctrl, C["side_hover"], C["surface"])))
+        boxed("Nav.TLabel", "Nav.bg", [("Label.padding", {"sticky": "nsew", "children": [
+            ("Label.label", {"sticky": "w"})]})])
+        s.configure("Nav.TLabel", background=C["surface"], foreground=C["muted"],
+                    font=self.f["nav"], padding=(px(14), px(10)))
+        s.map("Nav.TLabel", foreground=[("selected", "#F4F0FF"), ("active", C["text"])])
+        s.configure("NavBadge.TLabel", background=C["surface"], foreground=C["amber"],
+                    font=self.f["small_bold"])
+        s.map("NavBadge.TLabel", background=[("selected", C["accent_soft"]),
+                                             ("active", C["side_hover"])])
+
+        # The "new version" notice in the sidebar
+        element("Notice.bg", r_ctrl, rr(r_ctrl, C["accent_soft"], C["surface"], C["accent_off"]))
+        s.layout("Notice.TFrame", [("Notice.bg", {"sticky": "nsew"})])
+        s.configure("Notice.TFrame", background=C["accent_soft"])
+        s.configure("Notice.TLabel", background=C["accent_soft"], foreground=C["accent_text"],
+                    font=self.f["small"])
+        s.configure("NoticeAction.TLabel", background=C["accent_soft"], foreground="#FFFFFF",
+                    font=self.f["small_bold"])
+
+        # Progress: a slim rounded track
+        rp = px(3)
+        element("Track.trough", rp, rr(rp, C["line"], C["surface"]))
+        element("Track.pbar", rp, rr(rp, C["accent"], C["line"]))
+        s.layout("Accent.Horizontal.TProgressbar", [("Track.trough", {
+            "sticky": "nsew", "children": [("Track.pbar", {"side": "left", "sticky": "ns"})]})])
+        s.configure("Accent.Horizontal.TProgressbar", background=C["surface"])
+
+        # Tables
+        line = tkfont.Font(root=root, font=self.f["normal"]).metrics("linespace")
+        s.configure("Treeview", background=C["card"], fieldbackground=C["card"],
+                    foreground=C["text"], bordercolor=C["card"], lightcolor=C["card"],
+                    darkcolor=C["card"], borderwidth=0, rowheight=int(line * 2.2))
+        s.map("Treeview", background=[("selected", C["selected"])],
+              foreground=[("selected", "#FFFFFF")])
+        s.configure("Treeview.Heading", background=C["card"], foreground=C["muted"],
+                    font=self.f["small_bold"], relief="flat", bordercolor=C["line"],
+                    lightcolor=C["card"], darkcolor=C["line"], padding=(px(10), px(10)))
+        s.map("Treeview.Heading", background=[("active", C["card"])],
+              foreground=[("active", C["text"])])
+        s.layout("Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
+
+        # Slim rounded scrollbars, one per surface they sit on
+        rs = px(3)
+        for prefix, trough in (("", C["card"]), ("Field.", C["field"]), ("Page.", C["bg"])):
+            el = (prefix.rstrip(".") or "Card") + "Slim.thumb"
+            element(el, rs, rr(rs, "#363B68", trough), ("pressed", rr(rs, "#4D5290", trough)),
+                    ("active", rr(rs, "#4D5290", trough)))
+            name = f"{prefix}Vertical.TScrollbar"
+            s.layout(name, [("Vertical.Scrollbar.trough", {"sticky": "ns", "children": [
+                (el, {"expand": "1", "sticky": "nswe"})]})])
+            s.configure(name, troughcolor=trough, background=trough, bordercolor=trough,
+                        lightcolor=trough, darkcolor=trough, gripcount=0)
 
         # Checkboxes and radio buttons
         for kind in ("TCheckbutton", "TRadiobutton"):
             for prefix, bg in (("", C["bg"]), ("Card.", C["card"])):
                 st = prefix + kind
-                s.configure(st, background=bg, foreground=C["text"], padding=(0, 3),
-                            focusthickness=0, indicatorbackground=C["field"],
-                            indicatorforeground="#FFFFFF")
+                s.configure(st, background=bg, foreground=C["text"], padding=(0, px(4)),
+                            focusthickness=0)
                 s.map(st, background=[("active", bg)], foreground=[("disabled", C["faint"])])
         self.make_indicators(s)
 
-        # Entry fields
-        s.configure("TEntry", fieldbackground=C["field"], foreground=C["text"],
-                    bordercolor=C["border"], lightcolor=C["field"], darkcolor=C["field"],
-                    insertcolor=C["text"], padding=(8, 6))
-        s.map("TEntry", bordercolor=[("focus", C["accent"])],
-              lightcolor=[("focus", C["accent"])],
-              fieldbackground=[("readonly", C["surface"])],
-              foreground=[("readonly", C["muted"])])
-
-        # Progress
-        s.configure("Accent.Horizontal.TProgressbar", troughcolor=C["line"],
-                    background=C["accent"], bordercolor=C["line"], lightcolor=C["accent"],
-                    darkcolor=C["accent"], thickness=6)
-
-        # Tables
-        line = tkfont.Font(font=self.f["normal"]).metrics("linespace")
-        s.configure("Treeview", background=C["card"], fieldbackground=C["card"],
-                    foreground=C["text"], bordercolor=C["card"], lightcolor=C["card"],
-                    darkcolor=C["card"], borderwidth=0, rowheight=int(line * 2.1))
-        s.map("Treeview", background=[("selected", C["selected"])],
-              foreground=[("selected", "#FFFFFF")])
-        s.configure("Treeview.Heading", background=C["card"], foreground=C["faint"],
-                    font=self.f["small_bold"], relief="flat", bordercolor=C["line"],
-                    lightcolor=C["card"], darkcolor=C["line"], padding=(10, 8))
-        s.map("Treeview.Heading", background=[("active", C["hover"])],
-              foreground=[("active", C["muted"])])
-        s.layout("Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
-
-        # Scrollbars
-        for direction in ("Vertical", "Horizontal"):
-            s.configure(f"{direction}.TScrollbar", background="#2A2A38", troughcolor=C["card"],
-                        bordercolor=C["card"], lightcolor="#2A2A38", darkcolor="#2A2A38",
-                        arrowcolor=C["muted"], gripcount=0, arrowsize=12)
-            s.map(f"{direction}.TScrollbar", background=[("active", "#3A3A4C")],
-                  lightcolor=[("active", "#3A3A4C")], darkcolor=[("active", "#3A3A4C")])
-
     def make_indicators(self, s):
         """Own rounded checkboxes and radio buttons in the accent color."""
-        try:
-            scale = float(self.root.tk.call("tk", "scaling"))  # pixels per point
-        except (tk.TclError, ValueError):
-            scale = 1.33
-        n = max(14, round(12 * scale))
-        gap = round(6 * scale)
-        self.images = []
+        n, gap = self.px(17), self.px(10)
         for name, bg, check_style, radio_style in (
                 ("Page", C["bg"], "TCheckbutton", "TRadiobutton"),
                 ("Card", C["card"], "Card.TCheckbutton", "Card.TRadiobutton")):
-            off = draw_checkbox(self.root, n, bg, C["field"], "#3A3A4C", False)
+            off = draw_checkbox(self.root, n, bg, C["field"], C["border_hover"], False)
             on = draw_checkbox(self.root, n, bg, C["accent"], C["accent"], True)
-            off_dim = draw_checkbox(self.root, n, bg, C["surface"], C["border"], False)
+            off_dim = draw_checkbox(self.root, n, bg, C["card"], C["border"], False)
             on_dim = draw_checkbox(self.root, n, bg, C["accent_off"], C["accent_off"], True)
-            r_off = draw_radio(self.root, n, bg, C["field"], "#3A3A4C", None)
+            r_off = draw_radio(self.root, n, bg, C["field"], C["border_hover"], None)
             r_on = draw_radio(self.root, n, bg, C["field"], C["accent"], C["accent"])
             self.images += [off, on, off_dim, on_dim, r_off, r_on]
             for element, images, style, layout_name in (
@@ -1964,88 +2200,84 @@ class UserAtlasWindow:
     # ----- layout -----------------------------------------------------------
 
     def build(self):
-        r = self.root
+        r, px = self.root, self.px
         r.title("UserAtlas")
-        r.geometry("1340x816")
-        r.minsize(1120, 640)
+        self.place_window()
         r.columnconfigure(0, weight=0)   # sidebar (fixed width)
-        r.columnconfigure(1, weight=0)   # divider
-        r.columnconfigure(2, weight=1)   # content
+        r.columnconfigure(1, weight=0)   # hairline
+        r.columnconfigure(2, weight=1)   # pages
         r.rowconfigure(0, weight=1)
 
-        # ---- Left sidebar: brand, page navigation and every global control ----
-        side = tk.Frame(r, bg=C["surface"], width=208)
+        # ---- Sidebar: brand, the pages, and everything that applies to a whole run ----
+        side = tk.Frame(r, bg=C["surface"], width=px(240))
         side.grid(row=0, column=0, sticky="ns")
         side.pack_propagate(False)
-        tk.Frame(r, bg=C["border"], width=1).grid(row=0, column=1, sticky="ns")
+        tk.Frame(r, bg=C["line"], width=1).grid(row=0, column=1, sticky="ns")
 
         brand = tk.Frame(side, bg=C["surface"])
-        brand.pack(fill="x", padx=18, pady=(20, 18))
-        tk.Label(brand, text="@", bg=C["accent"], fg="#FFFFFF", font=self.f["heading"],
-                 width=2, pady=2).pack(side="left")
+        brand.pack(fill="x", padx=px(24), pady=(px(28), px(30)))
+        n = px(34)
+        tile = paint_rounded(r, n, n, px(10), C["accent"], C["surface"])
+        self.images.append(tile)
+        tk.Label(brand, image=tile, text="@", compound="center", fg="#FFFFFF",
+                 bg=C["surface"], font=self.f["brand"], bd=0).pack(side="left")
         tk.Label(brand, text="UserAtlas", bg=C["surface"], fg=C["text"],
-                 font=self.f["heading"]).pack(side="left", padx=(11, 0))
+                 font=self.f["brand"]).pack(side="left", padx=(px(12), 0))
 
+        nav = tk.Frame(side, bg=C["surface"])
+        nav.pack(fill="x", padx=px(14))
         self.tab_widgets = {}
-        self.nav_rows = {}
         for key, title in self.TABS:
-            row = tk.Frame(side, bg=C["surface"], cursor="hand2")
-            row.pack(fill="x")
-            bar = tk.Frame(row, bg=C["surface"], width=3)
-            bar.pack(side="left", fill="y")
-            label = tk.Label(row, text=title, bg=C["surface"], fg=C["muted"],
-                             font=self.f["bold"], anchor="w", padx=15, pady=9, cursor="hand2")
-            label.pack(side="left")
-            badge = tk.Label(row, text="", font=self.f["small_bold"], padx=6, bg=C["surface"])
-            for w in (row, bar, label, badge):
+            label = ttk.Label(nav, text=title, style="Nav.TLabel", cursor="hand2")
+            label.pack(fill="x", pady=(0, px(3)))
+            badge = ttk.Label(label, text="", style="NavBadge.TLabel", cursor="hand2")
+            for w in (label, badge):
                 w.bind("<Button-1>", lambda e, k=key: self.show_tab(k))
                 w.bind("<Enter>", lambda e, k=key: self.tab_hover(k, True))
                 w.bind("<Leave>", lambda e, k=key: self.tab_hover(k, False))
-            self.tab_widgets[key] = (label, bar, badge)
-            self.nav_rows[key] = row
+            self.tab_widgets[key] = (label, label, badge)
 
-        # Footer pinned to the bottom: counts, the "new version" notice,
-        # Start/Stop and the live status + progress.
         foot = tk.Frame(side, bg=C["surface"])
-        foot.pack(side="bottom", fill="x", padx=18, pady=(12, 18))
-
+        foot.pack(side="bottom", fill="x", padx=px(20), pady=(px(12), px(24)))
         self.summary_text = tk.StringVar()
         ttk.Label(foot, textvariable=self.summary_text, style="Bar.Muted.TLabel").pack(
-            anchor="w", pady=(0, 10))
+            anchor="w", pady=(0, px(12)))
 
-        self.update_pill = tk.Frame(foot, bg=C["accent_soft"], cursor="hand2")
-        self.update_text = tk.Label(self.update_pill, text="", bg=C["accent_soft"],
-                                    fg=C["accent_text"], font=self.f["small"], cursor="hand2",
-                                    anchor="w", justify="left")
-        self.update_text.pack(side="left", padx=(10, 6), pady=6)
-        self.update_button = tk.Label(self.update_pill, text="Update", bg=C["accent_soft"],
-                                      fg="#FFFFFF", font=self.f["small_bold"], cursor="hand2")
-        self.update_button.pack(side="right", padx=(0, 10), pady=6)
+        self.update_pill = ttk.Frame(foot, style="Notice.TFrame", padding=(px(12), px(9)),
+                                     cursor="hand2")
+        self.update_text = ttk.Label(self.update_pill, text="", style="Notice.TLabel",
+                                     cursor="hand2")
+        self.update_text.pack(side="left")
+        self.update_button = ttk.Label(self.update_pill, text="Update",
+                                       style="NoticeAction.TLabel", cursor="hand2")
+        self.update_button.pack(side="right")
         for w in (self.update_pill, self.update_text, self.update_button):
             w.bind("<Button-1>", lambda e: self.click_update())
 
-        self.start_button = ttk.Button(foot, text="Start checking", style="Accent.TButton",
-                                       command=self.start)
+        # One slot for the main action: Start, or Stop while a run is going
+        self.action_slot = tk.Frame(foot, bg=C["surface"])
+        self.action_slot.pack(fill="x")
+        self.start_button = ttk.Button(self.action_slot, text="Start checking",
+                                       style="Accent.TButton", command=self.start)
         self.start_button.pack(fill="x")
-        self.stop_button = ttk.Button(foot, text="Stop", style="Stop.TButton",
-                                      command=self.stopping, state="disabled")
-        self.stop_button.pack(fill="x", pady=(8, 0))
+        self.stop_button = ttk.Button(self.action_slot, text="Stop checking",
+                                      style="Stop.TButton", command=self.stopping,
+                                      state="disabled")
 
         self.status = tk.StringVar(value="Ready when you are.")
         ttk.Label(foot, textvariable=self.status, style="Bar.Muted.TLabel",
-                  wraplength=168, justify="left").pack(anchor="w", pady=(14, 8))
+                  wraplength=px(196), justify="left").pack(anchor="w", pady=(px(14), 0))
         self.progress = ttk.Progressbar(foot, style="Accent.Horizontal.TProgressbar",
-                                        mode="determinate")
-        self.progress.pack(fill="x")
+                                        mode="determinate")  # shown once a run starts
 
-        # ---- Content: one frame per page, stacked and raised on demand ----
+        # ---- Pages: stacked, the current one raised ----
         holder = ttk.Frame(r)
         holder.grid(row=0, column=2, sticky="nsew")
         holder.columnconfigure(0, weight=1)
         holder.rowconfigure(0, weight=1)
         self.pages = {}
         for key, _ in self.TABS:
-            p = ttk.Frame(holder, padding=(26, 22))
+            p = ttk.Frame(holder, padding=(px(40), px(34), px(40), px(30)))
             p.grid(row=0, column=0, sticky="nsew")
             self.pages[key] = p
         self.build_names(self.pages["names"])
@@ -2054,87 +2286,254 @@ class UserAtlasWindow:
         self.build_selftest(self.pages["selftest"])
         self.build_settings(self.pages["settings"])
 
-    def text_box(self, parent, height=None, font=None):
-        """A dark multi-line text field with a border that lights up on focus."""
-        border = tk.Frame(parent, bg=C["field"], highlightthickness=1,
-                          highlightbackground=C["border"], highlightcolor=C["border"])
+    # -- window size, settings file and small building blocks
+
+    def read_settings(self) -> dict:
+        try:
+            with open(self.settings_path, encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def write_settings(self, **changes) -> Optional[str]:
+        """Merge `changes` into settings.json. Returns an error text, or None."""
+        data = self.read_settings()
+        data.update(changes)
+        try:
+            os.makedirs(os.path.dirname(self.settings_path) or ".", exist_ok=True)
+            with open(self.settings_path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+        except OSError as e:
+            return str(e)
+        return None
+
+    def place_window(self):
+        """Open big: the size you left it at, or most of the screen, centered."""
+        r, px = self.root, self.px
+        sw, sh = r.winfo_screenwidth(), r.winfo_screenheight()
+        min_w, min_h = min(px(1120), sw - 40), min(px(700), sh - 80)
+        r.minsize(min_w, min_h)
+        saved = self.read_settings().get("window")
+        if isinstance(saved, dict):
+            try:
+                w, h, x, y = (int(saved[key]) for key in ("w", "h", "x", "y"))
+                if (min_w <= w <= sw and min_h <= h <= sh
+                        and 0 <= x <= sw - px(200) and 0 <= y <= sh - px(120)):
+                    r.geometry(f"{w}x{h}+{x}+{y}")
+                    if saved.get("zoomed") and os.name == "nt":
+                        r.after(0, lambda: r.state("zoomed"))
+                    return
+            except (KeyError, TypeError, ValueError):
+                pass
+        w = max(min(int(sw * 0.86), px(2000)), min_w)
+        h = max(min(int(sh * 0.86), px(1300)), min_h)
+        r.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 2 - px(16))}")
+
+    def remember_window(self):
+        try:
+            zoomed = self.root.state() == "zoomed"
+            m = re.match(r"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)", self.root.geometry())
+        except tk.TclError:
+            return
+        window = dict(self.read_settings().get("window") or {}) if zoomed else {}
+        if m and not zoomed:
+            window.update(zip(("w", "h", "x", "y"), map(int, m.groups())))
+        if window:
+            window["zoomed"] = zoomed
+            self.write_settings(window=window)
+
+    def page_header(self, p, title, description="", variable=None, scroll=False):
+        """Big page title with a description; returns (actions, body)."""
+        px = self.px
+        head = ttk.Frame(p)
+        head.pack(fill="x", pady=(0, px(24)))
+        # Actions are packed first so they always keep their room; the text wraps.
+        actions = ttk.Frame(head)
+        actions.pack(side="right", anchor="s", padx=(px(24), 0))
+        text = ttk.Frame(head)
+        text.pack(side="left", fill="x", expand=True)
+        ttk.Label(text, text=title, style="PageTitle.TLabel").pack(anchor="w")
+        desc = None
+        if variable is not None:
+            # Live text (e.g. a hover hint) gets a fixed two-line box: if its height
+            # followed the text, hovering would shift the page under the pointer and
+            # the hint would flicker on and off.
+            line = tkfont.Font(root=self.root, font=self.f["normal"]).metrics("linespace")
+            box = ttk.Frame(text, height=2 * line + px(4))
+            box.pack(fill="x", pady=(px(6), 0))
+            box.pack_propagate(False)
+            desc = ttk.Label(box, textvariable=variable, style="PageDesc.TLabel",
+                             wraplength=px(720), justify="left")
+            desc.pack(anchor="nw")
+        elif description:
+            desc = ttk.Label(text, text=description, style="PageDesc.TLabel",
+                             wraplength=px(720), justify="left")
+            desc.pack(anchor="w", pady=(px(6), 0))
+        if desc is not None:
+            text.bind("<Configure>", lambda e: desc.configure(
+                wraplength=max(px(200), min(px(720), e.width))))
+        if scroll:
+            body = self.scroll_area(p)
+        else:
+            body = ttk.Frame(p)
+            body.pack(fill="both", expand=True)
+        return actions, body
+
+    def scroll_area(self, parent):
+        """A page body that scrolls when a small window can't fit it all."""
+        outer = ttk.Frame(parent)
+        outer.pack(fill="both", expand=True)
+        canvas = tk.Canvas(outer, bg=C["bg"], highlightthickness=0, borderwidth=0)
+        bar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview,
+                            style="Page.Vertical.TScrollbar")
+        canvas.pack(side="left", fill="both", expand=True)
+        inner = ttk.Frame(canvas)
+        window = canvas.create_window(0, 0, window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=self.autohide(bar, side="right", fill="y", before=canvas))
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=(0, 0, e.width, e.height)))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window, width=e.width))
+
+        def wheel(event):
+            if canvas.yview() == (0.0, 1.0):
+                return
+            up = getattr(event, "num", None) == 4 or getattr(event, "delta", 0) > 0
+            canvas.yview_scroll(-3 if up else 3, "units")
+
+        def inside():
+            x, y = canvas.winfo_pointerxy()
+            return (canvas.winfo_rootx() <= x < canvas.winfo_rootx() + canvas.winfo_width()
+                    and canvas.winfo_rooty() <= y < canvas.winfo_rooty() + canvas.winfo_height())
+
+        def hook(on):
+            for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                if on:
+                    canvas.bind_all(sequence, wheel)
+                elif not inside():  # leaving onto a widget inside isn't leaving
+                    canvas.unbind_all(sequence)
+        canvas.bind("<Enter>", lambda e: hook(True))
+        canvas.bind("<Leave>", lambda e: hook(False))
+        return inner
+
+    def autohide(self, bar, **pack):
+        """A yscrollcommand that only shows the scrollbar when there's more to see."""
+        def set_(first, last):
+            first, last = float(first), float(last)
+            if first <= 0.0 and last >= 1.0:
+                if bar.winfo_ismapped():
+                    bar.pack_forget()
+            elif not bar.winfo_ismapped():
+                bar.pack(**pack)
+            bar.set(first, last)
+        return set_
+
+    def text_box(self, parent, height=None, font=None, surface="card"):
+        """A rounded multi-line text field whose outline lights up on focus."""
+        px = self.px
+        border = ttk.Frame(parent, style="Field.TFrame" if surface == "card" else "PageField.TFrame",
+                           padding=px(5))
         box = tk.Text(border, wrap="none", undo=True, relief="flat", borderwidth=0,
-                      highlightthickness=0, padx=14, pady=10, font=font or self.f["normal"],
-                      bg=C["field"], fg=C["text"], insertbackground=C["text"],
-                      selectbackground=C["selected"], selectforeground="#FFFFFF",
-                      spacing1=3, spacing3=3)
+                      highlightthickness=0, padx=px(10), pady=px(8),
+                      font=font or self.f["normal"], bg=C["field"], fg=C["text"],
+                      insertbackground=C["text"], selectbackground=C["selected"],
+                      selectforeground="#FFFFFF", spacing1=px(3), spacing3=px(3))
         if height:
             box.configure(height=height)
-        scroll = ttk.Scrollbar(border, orient="vertical", command=box.yview)
-        box.configure(yscrollcommand=scroll.set)
-        scroll.pack(side="right", fill="y")
+        scroll = ttk.Scrollbar(border, orient="vertical", command=box.yview,
+                               style="Field.Vertical.TScrollbar")
         box.pack(side="left", fill="both", expand=True)
-        box.bind("<FocusIn>", lambda e: border.configure(highlightbackground=C["accent"]))
-        box.bind("<FocusOut>", lambda e: border.configure(highlightbackground=C["border"]))
+        box.configure(yscrollcommand=self.autohide(scroll, side="right", fill="y", before=box))
+        box.bind("<FocusIn>", lambda e: border.state(["focus"]))
+        box.bind("<FocusOut>", lambda e: border.state(["!focus"]))
         return border, box
 
-    # -- tab: Names
+    def fit_columns(self):
+        """On a narrow window, drop the per-group columns rather than clip them."""
+        base = ["name", "available", "allowed"]
+        if not self.groups:
+            return
+        need = sum(int(self.table.column(c, "minwidth")) for c in base + self.groups)
+        cols = base + (self.groups if self.table.winfo_width() >= need else [])
+        current = [str(c) for c in self.table["displaycolumns"]]
+        if current != cols:
+            self.table.configure(displaycolumns=cols)
+
+    def table_hover(self, event):
+        """Light up the results row under the pointer."""
+        row = self.table.identify_row(event.y) if event is not None else ""
+        if row == self._hover_row:
+            return
+        for iid, on in ((self._hover_row, False), (row, True)):
+            if iid and self.table.exists(iid):
+                tags = [t for t in (self.table.item(iid, "tags") or ()) if t != "hover"]
+                self.table.item(iid, tags=tags + (["hover"] if on else []))
+        self._hover_row = row
+
+    # -- page: Names
 
     def build_names(self, p):
-        p.columnconfigure(0, weight=1)
-        p.columnconfigure(1, weight=1)
-        p.rowconfigure(0, weight=1)
-        k = Card(p, "Names", "Type or paste the names you want to check, one per line.")
-        k.outer.grid(row=0, column=0, sticky="nsew", padx=(0, 16))
+        px = self.px
+        actions, body = self.page_header(
+            p, "Names", "Paste or type the handles you want to check, one per line. Commas and "
+                        "spaces work too; an @ in front is dropped and anything after # is "
+                        "ignored.")
+        ttk.Button(actions, text="Load file…", style="Page.TButton",
+                   command=self.load_file).pack(side="left")
+        ttk.Button(actions, text="Paste", style="Page.TButton",
+                   command=self.paste_names).pack(side="left", padx=(px(8), 0))
+        ttk.Button(actions, text="Clear", style="Page.TButton",
+                   command=self.clear_names).pack(side="left", padx=(px(8), 0))
+
+        body.columnconfigure(0, weight=5, uniform="names")
+        body.columnconfigure(1, weight=7, uniform="names")
+        body.rowconfigure(0, weight=1)
+        k = Card(body, "Your list")
+        k.outer.grid(row=0, column=0, sticky="nsew", padx=(0, px(20)))
         self.name_count = tk.StringVar(value="0 names")
         ttk.Label(k.head, textvariable=self.name_count, style="Counter.TLabel").pack(side="right")
         border, self.names_box = self.text_box(k.body)
         border.pack(fill="both", expand=True)
         self.names_box.bind("<<Modified>>", self.names_changed)
-
-        buttons = ttk.Frame(k.body, style="Card.TFrame")
-        buttons.pack(fill="x", pady=(12, 0))
-        ttk.Button(buttons, text="Load file…", command=self.load_file).pack(side="left")
-        ttk.Button(buttons, text="Paste", command=self.paste_names).pack(side="left", padx=(8, 0))
-        ttk.Button(buttons, text="Clear", command=self.clear_names).pack(side="left", padx=(8, 0))
-        ttk.Button(buttons, text="Next: platforms  →", style="Link.TButton",
-                   command=lambda: self.show_tab("platforms")).pack(side="right")
-        ttk.Label(k.body, style="Card.Muted.TLabel", wraplength=430, justify="left",
-                  text="Tip: commas and spaces work too · an @ in front is removed · anything "
-                       "after # is a note · Ctrl+Enter starts checking").pack(anchor="w", pady=(10, 0))
+        ttk.Label(k.body, style="Card.Muted.TLabel",
+                  text="Ctrl+Enter starts checking.").pack(anchor="w", pady=(px(12), 0))
 
         # Live check against each site's naming rules (no internet needed)
-        r = Card(p, "Name rules", "Is each name allowed by the sites you picked? Checked "
-                                  "right away, before you start.", wrap=420)
-        r.outer.grid(row=0, column=1, sticky="nsew")
+        rc = Card(body, "Name rules", "Whether each site you picked allows the name. Checked "
+                                      "as you type, before anything goes online.", wrap=500)
+        rc.outer.grid(row=0, column=1, sticky="nsew")
         self.rules_count = tk.StringVar(value="")
-        ttk.Label(r.head, textvariable=self.rules_count, style="Counter.TLabel").pack(side="right")
-        box = ttk.Frame(r.body, style="Card.TFrame")
+        ttk.Label(rc.head, textvariable=self.rules_count, style="Counter.TLabel").pack(side="right")
+        box = ttk.Frame(rc.body, style="Card.TFrame")
         box.pack(fill="both", expand=True)
         self.rules_table = ttk.Treeview(box, columns=("name", "allowed", "problem"),
                                         show="headings", selectmode="browse", height=8)
-        for col, title, width, stretch, anchor in (("name", "NAME", 140, False, "w"),
-                                                   ("allowed", "ALLOWED", 100, False, "center"),
-                                                   ("problem", "WHY NOT", 220, True, "w")):
+        for col, title, width, stretch, anchor in (("name", "Name", 170, False, "w"),
+                                                   ("allowed", "Allowed", 96, False, "center"),
+                                                   ("problem", "Why not", 260, True, "w")):
             self.rules_table.heading(col, text=title, anchor=anchor)
-            self.rules_table.column(col, width=width, minwidth=60, stretch=stretch, anchor=anchor)
+            self.rules_table.column(col, width=px(width), minwidth=px(60), stretch=stretch,
+                                    anchor=anchor)
         self.rules_table.tag_configure("fits", foreground=C["green"])
         self.rules_table.tag_configure("issue", foreground=C["amber"])
         self.rules_table.tag_configure("blocked", foreground=C["red"])
         rs = ttk.Scrollbar(box, orient="vertical", command=self.rules_table.yview)
-        self.rules_table.configure(yscrollcommand=rs.set)
-        rs.pack(side="right", fill="y")
         self.rules_table.pack(side="left", fill="both", expand=True)
+        self.rules_table.configure(yscrollcommand=self.autohide(
+            rs, side="right", fill="y", before=self.rules_table))
         self.rules_table.bind("<<TreeviewSelect>>", lambda e: self.show_rule_detail())
         self.rules_empty = ttk.Label(box, style="Card.Muted.TLabel", justify="center",
-                                     text="Your names show up here as you type.")
+                                     text="Names appear here as you type.")
         self.rules_empty.place(relx=0.5, rely=0.45, anchor="center")
 
-        detail_border = tk.Frame(r.body, bg=C["field"], highlightthickness=1,
-                                 highlightbackground=C["border"])
-        detail_border.pack(fill="x", pady=(12, 0))
-        self.rules_detail = tk.Text(detail_border, height=7, wrap="word", state="disabled",
+        detail = ttk.Frame(rc.body, style="Field.TFrame", padding=px(5))
+        detail.pack(fill="x", pady=(px(14), 0))
+        self.rules_detail = tk.Text(detail, height=6, wrap="word", state="disabled",
                                     relief="flat", borderwidth=0, highlightthickness=0,
-                                    padx=12, pady=8, font=self.f["small"], bg=C["field"],
-                                    fg=C["text"], spacing1=2, spacing3=2,
+                                    padx=px(10), pady=px(8), font=self.f["small"], bg=C["field"],
+                                    fg=C["text"], spacing1=px(2), spacing3=px(2),
                                     selectbackground=C["selected"])
         self.rules_detail.tag_configure("head", font=self.f["small_bold"], foreground="#FFFFFF")
-        self.rules_detail.tag_configure("site", foreground=C["accent_text"])
+        self.rules_detail.tag_configure("site", font=self.f["small_bold"], foreground=C["text"])
         self.rules_detail.tag_configure("ok", foreground=C["green"])
         self.rules_detail.tag_configure("muted", foreground=C["muted"])
         self.rules_detail.tag_configure("blocked", foreground=C["red"])
@@ -2142,32 +2541,46 @@ class UserAtlasWindow:
         self.rules_after = None
         self.show_rule_detail()
 
-    # -- tab: Platforms
+    # -- page: Platforms
 
     def build_platforms(self, p):
-        self.platform_hint_default = ("Hover a platform to see its name rules. Instagram, TikTok "
-                                      "and X don't like automated checks and sometimes drop out; "
-                                      "the self-test notices this and skips them.")
+        px = self.px
+        self.platform_hint_default = "Hover a platform to see its naming rules."
         self.platform_hint = tk.StringVar(value=self.platform_hint_default)
-        top = ttk.Frame(p)
-        top.pack(fill="x", pady=(0, 14))
+        actions, body = self.page_header(p, "Platforms", variable=self.platform_hint, scroll=True)
         self.platform_count = tk.StringVar()
-        ttk.Label(top, textvariable=self.platform_count, style="Page.TLabel").pack(side="left")
-        ttk.Button(top, text="None", command=lambda: self.set_all(False)).pack(side="right")
-        ttk.Button(top, text="All", command=lambda: self.set_all(True)).pack(
-            side="right", padx=(0, 8))
+        ttk.Label(actions, textvariable=self.platform_count, style="PageCounter.TLabel").pack(
+            side="left", padx=(0, px(16)))
+        ttk.Button(actions, text="Select all", style="Page.TButton",
+                   command=lambda: self.set_all(True)).pack(side="left")
+        ttk.Button(actions, text="Clear all", style="Page.TButton",
+                   command=lambda: self.set_all(False)).pack(side="left", padx=(px(8), 0))
 
-        grid = ttk.Frame(p)
-        grid.pack(fill="x")
+        columns = 6
         self.checks: Dict[str, tk.BooleanVar] = {}
         self.group_counts: Dict[str, tk.StringVar] = {}
-        for col, group in enumerate(GROUPS):
-            grid.columnconfigure(col, weight=1, uniform="group")
-            k = Card(grid, GROUP_TITLES[group], GROUP_HINTS[group], wrap=200)
-            k.outer.grid(row=0, column=col, sticky="nsew", padx=(0 if col == 0 else 14, 0))
+        for gi, group in enumerate(GROUPS):
+            section = ttk.Frame(body)
+            section.pack(fill="x", padx=(0, px(8)), pady=(0 if gi == 0 else px(24), 0))
+            row = ttk.Frame(section)
+            row.pack(fill="x")
+            ttk.Label(row, text=GROUP_TITLES[group], style="SectionTitle.TLabel").pack(side="left")
+            ttk.Label(row, text=GROUP_HINTS[group], style="Page.TLabel").pack(
+                side="left", padx=(px(12), 0), pady=(px(3), 0))
+            ttk.Button(row, text="None", style="Page.Link.TButton",
+                       command=lambda g=group: self.set_group(g, False)).pack(side="right")
+            ttk.Button(row, text="All", style="Page.Link.TButton",
+                       command=lambda g=group: self.set_group(g, True)).pack(
+                side="right", padx=(0, px(12)))
             counter = tk.StringVar()
             self.group_counts[group] = counter
-            ttk.Label(k.head, textvariable=counter, style="Counter.TLabel").pack(side="right")
+            ttk.Label(row, textvariable=counter, style="PageCounter.TLabel").pack(
+                side="right", padx=(0, px(18)))
+
+            grid = ttk.Frame(section)
+            grid.pack(fill="x", pady=(px(12), 0))
+            for c in range(columns):
+                grid.columnconfigure(c, weight=1, uniform="chips")
             if group == "domains":
                 domain_rules = all_platforms(["com"])[-1].rules.describe()
                 items = [(f"domain.{t}", f".{t}", f".{t} domains: {domain_rules}")
@@ -2175,168 +2588,215 @@ class UserAtlasWindow:
             else:
                 items = [(q.key, q.short_title, f"{q.short_title} names: {q.rules.describe()}")
                          for q in self.everything if q.group == group]
-            for key, text, rule_text in items:
+            for i, (key, text, rule_text) in enumerate(items):
                 v = tk.BooleanVar(value=True)
                 v.trace_add("write", lambda *_: self.update_summary())
                 self.checks[key] = v
-                box = ttk.Checkbutton(k.body, text=text, variable=v, style="Card.TCheckbutton")
-                box.pack(anchor="w")
-                box.bind("<Enter>", lambda e, t=rule_text: self.platform_hint.set(t))
-                box.bind("<Leave>", lambda e: self.platform_hint.set(self.platform_hint_default))
+                chip = ttk.Checkbutton(grid, text=text, variable=v, style="Chip.TCheckbutton",
+                                       cursor="hand2")
+                chip.grid(row=i // columns, column=i % columns, sticky="ew",
+                          padx=(0, px(10)), pady=(0, px(10)))
+                chip.bind("<Enter>", lambda e, t=rule_text: self.platform_hint.set(t))
+                chip.bind("<Leave>", lambda e: self.platform_hint.set(self.platform_hint_default))
             if group == "domains":
-                ttk.Label(k.body, text="Other extensions", style="Card.TLabel").pack(
-                    anchor="w", pady=(12, 4))
+                extra = ttk.Frame(section)
+                extra.pack(fill="x", pady=(px(6), 0))
+                ttk.Label(extra, text="Other extensions").pack(side="left")
                 self.extra_tlds = tk.StringVar()
                 self.extra_tlds.trace_add("write", lambda *_: self.update_summary())
-                ttk.Entry(k.body, textvariable=self.extra_tlds).pack(fill="x")
-                ttk.Label(k.body, text="For example: de, be, app",
-                          style="Card.Muted.TLabel").pack(anchor="w", pady=(4, 0))
-            foot = ttk.Frame(k.body, style="Card.TFrame")
-            foot.pack(fill="x", side="bottom", pady=(14, 0))
-            ttk.Button(foot, text="All", style="Link.TButton",
-                       command=lambda g=group: self.set_group(g, True)).pack(side="left")
-            ttk.Label(foot, text="·", style="Card.Muted.TLabel").pack(side="left", padx=2)
-            ttk.Button(foot, text="None", style="Link.TButton",
-                       command=lambda g=group: self.set_group(g, False)).pack(side="left")
+                ttk.Entry(extra, textvariable=self.extra_tlds, style="Page.TEntry",
+                          width=22).pack(side="left", padx=(px(14), px(14)))
+                ttk.Label(extra, text="For example: de, be, app", style="Page.TLabel").pack(
+                    side="left")
 
-        ttk.Label(p, textvariable=self.platform_hint, style="Muted.TLabel", wraplength=1100,
-                  justify="left").pack(anchor="w", pady=(14, 0))
-
-    # -- tab: Results
+    # -- page: Results
 
     def build_results(self, p):
-        p.columnconfigure(0, weight=1)
-        p.columnconfigure(1, minsize=370)
-        p.rowconfigure(1, weight=1)
-
-        bar = ttk.Frame(p)
-        bar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 14))
-        ttk.Label(bar, text="Search").pack(side="left", padx=(0, 8))
+        px = self.px
+        actions, body = self.page_header(
+            p, "Results", "Every name against every platform. Click a column to sort, and pick "
+                          "a name to see where it's free.")
         self.search = tk.StringVar()
         self.search.trace_add("write", lambda *_: self.show())
-        ttk.Entry(bar, textvariable=self.search, width=24).pack(side="left")
-        self.only_available = tk.BooleanVar(value=False)
-        ttk.Checkbutton(bar, text="Only names that are available somewhere",
-                        variable=self.only_available, command=self.show).pack(side="left", padx=(20, 0))
-        ttk.Button(bar, text="Save overview…", command=self.export).pack(side="right")
+        search = ttk.Entry(actions, textvariable=self.search, style="Page.TEntry", width=22)
+        search.pack(side="left")
+        hint = ttk.Label(actions, text="Search names", style="SearchHint.TLabel",
+                         cursor="xterm")
 
-        left = Card(p, padding=(2, 2))
-        left.outer.grid(row=1, column=0, sticky="nsew", padx=(0, 16))
+        def place_hint(*_):
+            try:
+                focused = self.root.focus_get() is search
+            except (KeyError, tk.TclError):
+                focused = False
+            if self.search.get() or focused:
+                hint.place_forget()
+            else:
+                hint.place(in_=search, x=px(13), rely=0.5, anchor="w")
+        hint.bind("<Button-1>", lambda e: search.focus_set())
+        search.bind("<FocusIn>", place_hint, add="+")
+        search.bind("<FocusOut>", place_hint, add="+")
+        self.search.trace_add("write", place_hint)
+        self.root.after_idle(place_hint)
+        self.only_available = tk.BooleanVar(value=False)
+        ttk.Checkbutton(actions, text="Only names free somewhere", variable=self.only_available,
+                        command=self.show).pack(side="left", padx=(px(20), px(20)))
+        ttk.Button(actions, text="Export CSV…", style="Page.TButton",
+                   command=self.export).pack(side="left")
+
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
+        # The detail panel takes about a third of the room, within sensible bounds.
+        body.bind("<Configure>", lambda e: body.columnconfigure(
+            1, minsize=max(px(360), min(px(470), int(e.width * 0.36)))))
+        left = Card(body, padding=(10, 8))
+        left.outer.grid(row=0, column=0, sticky="nsew", padx=(0, px(20)))
         self.table = ttk.Treeview(left.body, show="headings", selectmode="browse")
         ys = ttk.Scrollbar(left.body, orient="vertical", command=self.table.yview)
-        self.table.configure(yscrollcommand=ys.set)
-        ys.pack(side="right", fill="y")
         self.table.pack(side="left", fill="both", expand=True)
+        self.table.configure(yscrollcommand=self.autohide(ys, side="right", fill="y",
+                                                          before=self.table))
         self.table.tag_configure("allavailable", background=C["row_free"])
         self.table.tag_configure("noneavailable", foreground=C["faint"])
+        self.table.tag_configure("hover", background=C["hover"])
+        self._hover_row = ""
+        self.table.bind("<Configure>", lambda e: self.fit_columns(), add="+")
+        self.table.bind("<Motion>", self.table_hover)
+        self.table.bind("<Leave>", lambda e: self.table_hover(None))
         self.table.bind("<<TreeviewSelect>>", self.selection)
         self.empty = ttk.Label(left.body, style="Card.Muted.TLabel", justify="center",
                                text="No results yet.\n"
-                                    "Enter names and press 'Start checking'.")
+                                    "Add names, then press Start checking.")
         self.empty.place(relx=0.5, rely=0.42, anchor="center")
 
-        right = Card(p)
-        right.outer.grid(row=1, column=1, sticky="nsew")
+        right = Card(body, padding=(26, 24))
+        right.outer.grid(row=0, column=1, sticky="nsew")
         self.detail = right.body
+        self._pill_cols = 3
+        self.detail.bind("<Configure>", lambda e: self.root.after_idle(self.refit_pills))
         self.build_table([], [])
         self.show_detail(None)
 
-    # -- tab: Self-test & log
+    # -- page: Self-test & log
 
     def build_selftest(self, p):
-        p.columnconfigure(0, weight=1)
-        p.rowconfigure(0, weight=3)
-        p.rowconfigure(1, weight=2)
-        k = Card(p, "Self-test",
-                 "Per platform we check a known name (which must be taken) and a random name "
-                 "(which must be available). If that doesn't add up, the platform is skipped, "
-                 "so you never get a false 'available'.", wrap=820)
-        k.outer.grid(row=0, column=0, sticky="nsew", pady=(0, 16))
-        self.test_button = ttk.Button(k.head, text="Run self-test now",
+        px = self.px
+        actions, body = self.page_header(
+            p, "Self-test & log", "Before a run, each platform gets a name that must be taken "
+                                  "and a random one that must be free. Platforms that get it "
+                                  "wrong are skipped, so you never see a false ‘available’.")
+        self.test_button = ttk.Button(actions, text="Run self-test", style="Page.TButton",
                                       command=lambda: self.start(only_selftest=True))
-        self.test_button.pack(side="right")
+        self.test_button.pack(side="left")
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=3)
+        body.rowconfigure(1, weight=2)
+        k = Card(body, padding=(10, 8))
+        k.outer.grid(row=0, column=0, sticky="nsew", pady=(0, px(20)))
         box = ttk.Frame(k.body, style="Card.TFrame")
         box.pack(fill="both", expand=True)
         self.test_table = ttk.Treeview(box, columns=("platform", "group", "state", "why"),
                                        show="headings", selectmode="none", height=6)
-        for col, title, width, stretch in (("platform", "PLATFORM", 200, False),
-                                           ("group", "GROUP", 120, False),
-                                           ("state", "STATUS", 190, False),
-                                           ("why", "DETAILS", 300, True)):
+        for col, title, width, stretch in (("platform", "Platform", 220, False),
+                                           ("group", "Group", 130, False),
+                                           ("state", "Status", 220, False),
+                                           ("why", "Details", 320, True)):
             self.test_table.heading(col, text=title, anchor="w")
-            self.test_table.column(col, width=width, stretch=stretch, anchor="w")
+            self.test_table.column(col, width=px(width), stretch=stretch, anchor="w")
         self.test_table.tag_configure("works", foreground=C["text"])
         self.test_table.tag_configure("not working", foreground=C["amber"])
         self.test_table.tag_configure("busy", foreground=C["accent_text"])
         self.test_table.tag_configure("", foreground=C["faint"])
         ts = ttk.Scrollbar(box, orient="vertical", command=self.test_table.yview)
-        self.test_table.configure(yscrollcommand=ts.set)
-        ts.pack(side="right", fill="y")
         self.test_table.pack(side="left", fill="both", expand=True)
+        self.test_table.configure(yscrollcommand=self.autohide(
+            ts, side="right", fill="y", before=self.test_table))
 
-        m = Card(p, "Log")
+        m = Card(body, "Activity")
         m.outer.grid(row=1, column=0, sticky="nsew")
-        ttk.Button(m.head, text="Clear", style="Link.TButton", command=self.clear_log).pack(side="right")
+        ttk.Button(m.head, text="Clear", style="Link.TButton", command=self.clear_log).pack(
+            side="right")
         self.log_box = tk.Text(m.body, height=5, wrap="word", state="disabled", relief="flat",
                                borderwidth=0, highlightthickness=0, font=self.f["small"],
-                               bg=C["card"], fg=C["text"], spacing1=2, spacing3=2,
+                               bg=C["card"], fg=C["text"], spacing1=px(3), spacing3=px(3),
                                selectbackground=C["selected"])
         self.log_box.tag_configure("time", foreground=C["faint"])
         ls = ttk.Scrollbar(m.body, orient="vertical", command=self.log_box.yview)
-        self.log_box.configure(yscrollcommand=ls.set)
         ls.pack(side="right", fill="y")
+        self.log_box.configure(yscrollcommand=ls.set)
         self.log_box.pack(side="left", fill="both", expand=True)
 
-    # -- tab: Settings
+    # -- page: Settings
 
     def build_settings(self, p):
-        p.columnconfigure(0, weight=1, uniform="settings")
-        p.columnconfigure(1, weight=1, uniform="settings")
-        t = Card(p, "Speed", "The calmer, the smaller the chance a site temporarily "
-                             "blocks you.", wrap=440)
-        t.outer.grid(row=0, column=0, sticky="nsew", padx=(0, 16), pady=(0, 16))
+        px = self.px
+        _, body = self.page_header(p, "Settings", scroll=True)
+        body.columnconfigure(0, weight=1, uniform="settings")
+        body.columnconfigure(1, weight=1, uniform="settings")
+        columns = [ttk.Frame(body), ttk.Frame(body)]
+        columns[0].grid(row=0, column=0, sticky="nsew", padx=(0, px(56)))
+        columns[1].grid(row=0, column=1, sticky="nsew")
+        wrap = px(500)
+        flowing = {0: [], 1: []}  # labels that wrap to their column's actual width
+
+        def flow(column, label, indent=0):
+            flowing[column].append((label, indent))
+            return label
+
+        for i, column in enumerate(columns):
+            column.bind("<Configure>", lambda e, i=i: [
+                label.configure(wraplength=max(px(160), min(px(560), e.width - indent)))
+                for label, indent in flowing[i]])
+
+        def section(column, title, description=None):
+            parent = columns[column]
+            if parent.winfo_children():
+                tk.Frame(parent, bg=C["line"], height=1).pack(fill="x", pady=px(24))
+            ttk.Label(parent, text=title, style="SectionTitle.TLabel").pack(anchor="w")
+            if description:
+                flow(column, ttk.Label(parent, text=description, style="Page.TLabel",
+                                       wraplength=wrap, justify="left")).pack(
+                    anchor="w", pady=(px(4), 0))
+            box = ttk.Frame(parent)
+            box.pack(fill="x", pady=(px(14), 0))
+            return box
+
+        box = section(0, "Speed", "The calmer, the smaller the chance a site briefly blocks you.")
         self.speed = tk.DoubleVar(value=1.0)
         for title, factor, hint in SPEEDS:
-            ttk.Radiobutton(t.body, text=title, value=factor, variable=self.speed,
-                            style="Card.TRadiobutton").pack(anchor="w")
-            ttk.Label(t.body, text=hint, style="Card.Muted.TLabel", wraplength=420,
-                      justify="left").pack(anchor="w", padx=(27, 0), pady=(0, 8))
+            ttk.Radiobutton(box, text=title, value=factor, variable=self.speed).pack(anchor="w")
+            flow(0, ttk.Label(box, text=hint, style="Page.TLabel", wraplength=wrap,
+                              justify="left"), px(27)).pack(anchor="w", padx=(px(27), 0),
+                                                            pady=(0, px(8)))
 
-        s = Card(p, "When starting")
-        s.outer.grid(row=0, column=1, sticky="nsew", pady=(0, 16))
+        box = section(0, "When starting")
         self.selftest_on = tk.BooleanVar(value=True)
         self.recheck = tk.BooleanVar(value=False)
         for var, title, hint in (
                 (self.selftest_on, "Run a self-test first",
                  "Recommended. Platforms that don't answer properly right now are skipped."),
                 (self.recheck, "Check earlier results again",
-                 "By default, names that were already checked are not checked again.")):
-            ttk.Checkbutton(s.body, text=title, variable=var,
-                            style="Card.TCheckbutton").pack(anchor="w")
-            ttk.Label(s.body, text=hint, style="Card.Muted.TLabel", wraplength=420,
-                      justify="left").pack(anchor="w", padx=(27, 0), pady=(0, 8))
+                 "Normally, names that were already checked aren't checked again.")):
+            ttk.Checkbutton(box, text=title, variable=var).pack(anchor="w")
+            flow(0, ttk.Label(box, text=hint, style="Page.TLabel", wraplength=wrap,
+                              justify="left"), px(27)).pack(anchor="w", padx=(px(27), 0),
+                                                            pady=(0, px(8)))
 
-        o = Card(p, "Storage", "Every result is saved right away. Stop halfway and the next "
-                               "run continues where you left off.", wrap=900)
-        o.outer.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(0, 16))
-        row = ttk.Frame(o.body, style="Card.TFrame")
-        row.pack(fill="x")
-        field_ = ttk.Entry(row)
+        box = section(0, "Storage", "Every result is saved right away. Stop halfway and the "
+                                    "next run carries on where you left off.")
+        field_ = ttk.Entry(box, style="Page.TEntry")
         field_.insert(0, self.log_path)
         field_.configure(state="readonly")
         field_.pack(side="left", fill="x", expand=True)
-        ttk.Button(row, text="Open folder", command=self.open_folder).pack(side="left", padx=(8, 0))
+        ttk.Button(box, text="Open folder", style="Page.TButton",
+                   command=self.open_folder).pack(side="left", padx=(px(10), 0))
 
-        px = Card(p, "Proxy (optional)",
-                  "Route every check through your own proxy — useful if your connection gets "
-                  "rate-limited during big runs, or to check from another region. Paste one "
-                  "proxy per line in IP:PORT:USER:PASS form (how most providers give them); "
-                  "IP:PORT without a login and full URLs like socks5h://host:port work too. "
-                  "With several, checks rotate through them and hop to another whenever one "
-                  "gets rate-limited. Leave empty to use your normal connection. "
-                  "(SOCKS needs 'pip install requests[socks]'.)", wrap=900)
-        px.outer.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(0, 16))
-        border, self.proxy_box = self.text_box(px.body, height=4, font=self.f["small"])
+        box = section(1, "Proxies", "Optional. Paste one proxy per line as IP:PORT:USER:PASS, "
+                                    "the way most providers hand them out. IP:PORT and full "
+                                    "URLs such as socks5h://host:port work too. With several, "
+                                    "checks rotate through them and switch when one gets "
+                                    "rate-limited. SOCKS needs 'pip install requests[socks]'.")
+        border, self.proxy_box = self.text_box(box, height=4, font=self.f["small"],
+                                               surface="page")
         border.pack(fill="x")
         # Faintly show the expected format in the empty box as a hint.
         self._proxy_ph = "IP:PORT:USER:PASS\n(one proxy per line)"
@@ -2344,76 +2804,77 @@ class UserAtlasWindow:
         self.proxy_box.bind("<FocusIn>", lambda e: self._proxy_hide_ph(), add="+")
         self.proxy_box.bind("<FocusOut>", lambda e: self._proxy_show_ph(), add="+")
         self._proxy_show_ph()
-        row = ttk.Frame(px.body, style="Card.TFrame")
-        row.pack(fill="x", pady=(8, 0))
-        ttk.Button(row, text="Test", command=self.test_proxy).pack(side="left")
-        ttk.Button(row, text="Save", command=self.save_proxy).pack(side="left", padx=(8, 0))
+        row = ttk.Frame(box)
+        row.pack(fill="x", pady=(px(10), 0))
+        ttk.Button(row, text="Test proxies", style="Page.TButton",
+                   command=self.test_proxy).pack(side="left")
+        ttk.Button(row, text="Save proxies", style="Page.TButton",
+                   command=self.save_proxy).pack(side="left", padx=(px(8), 0))
         self.proxy_status = tk.StringVar(value="")
-        ttk.Label(px.body, textvariable=self.proxy_status, style="Card.Muted.TLabel",
-                  wraplength=900, justify="left").pack(anchor="w", pady=(8, 0))
+        flow(1, ttk.Label(box, textvariable=self.proxy_status, style="Page.TLabel",
+                          wraplength=wrap, justify="left")).pack(anchor="w", pady=(px(8), 0))
 
-        v = Card(p, "Version")
-        v.outer.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(0, 16))
-        row = ttk.Frame(v.body, style="Card.TFrame")
-        row.pack(fill="x")
-        ttk.Label(row, text=f"UserAtlas {VERSION}", style="Card.TLabel",
-                  font=self.f["bold"]).pack(side="left")
+        box = section(1, "Version")
+        ttk.Label(box, text=f"UserAtlas {VERSION}", style="Strong.TLabel").pack(anchor="w")
         if LAUNCHER:
             origin = ("just fetched from GitHub" if LAUNCHER.get("source") == "github"
                       else "offline copy")
-            below = f"app {str(LAUNCHER.get('commit', ''))[:7]} · {origin}"
+            below = f"App {str(LAUNCHER.get('commit', ''))[:7]}, {origin}."
         else:
-            below = "plain script"
-        ttk.Label(row, text=below, style="Card.Muted.TLabel").pack(side="left", padx=(12, 0))
+            below = "Running as a plain script."
+        ttk.Label(box, text=below, style="Page.TLabel").pack(anchor="w", pady=(px(2), 0))
         self.update_status = tk.StringVar(value="")
-        ttk.Label(row, textvariable=self.update_status,
-                  style="Card.Muted.TLabel").pack(side="left", padx=(12, 0))
-        ttk.Button(row, text="View on GitHub", style="Link.TButton",
-                   command=lambda: webbrowser.open(f"https://github.com/{GITHUB_REPO}")
-                   ).pack(side="right")
-        self.check_button = ttk.Button(row, text="Check for updates",
+        ttk.Label(box, textvariable=self.update_status, style="Page.TLabel").pack(anchor="w")
+        row = ttk.Frame(box)
+        row.pack(fill="x", pady=(px(10), 0))
+        self.check_button = ttk.Button(row, text="Check for updates", style="Page.TButton",
                                        command=lambda: self.check_updates(manual=True))
-        self.check_button.pack(side="right", padx=(0, 12))
+        self.check_button.pack(side="left")
+        ttk.Button(row, text="View on GitHub", style="Page.Link.TButton",
+                   command=lambda: webbrowser.open(f"https://github.com/{GITHUB_REPO}")
+                   ).pack(side="left", padx=(px(16), 0))
 
-        w = Card(p, "Good to know")
-        w.outer.grid(row=4, column=0, columnspan=2, sticky="nsew")
-        ttk.Label(w.body, style="Card.TLabel", wraplength=900, justify="left",
-                  text="'Available' means no account or registration was found. Some names "
-                       "are still blocked or reserved; you'll only find out when claiming. "
-                       "Click a platform in the Results tab to go straight to the right page."
-                  ).pack(anchor="w")
+        box = section(1, "About results")
+        flow(1, ttk.Label(box, wraplength=wrap, justify="left",
+                          text="‘Available’ means no account or registration was found. Some "
+                               "names are still blocked or reserved, which you'll only find out "
+                               "when claiming. Click a platform on the Results page to go "
+                               "straight to its page.")).pack(anchor="w")
 
     # ----- tabs -------------------------------------------------------------
 
     def show_tab(self, key):
         self.current_tab = key
         self.pages[key].tkraise()
-        for k, (label, bar, _) in self.tab_widgets.items():
-            active = k == key
-            bg = C["selected"] if active else C["surface"]
-            self.nav_rows[k].configure(bg=bg)
-            label.configure(fg="#FFFFFF" if active else C["muted"], bg=bg)
-            bar.configure(bg=C["accent"] if active else bg)
+        for k, (label, _, badge) in self.tab_widgets.items():
+            state = ["selected"] if k == key else ["!selected"]
+            label.state(state)
+            badge.state(state)
         if key == "selftest" and not self.busy:
             self.fill_test_table(self.chosen_platforms(quiet=True))
 
     def tab_hover(self, key, inside):
-        if key == self.current_tab:
-            return
-        bg = C["hover"] if inside else C["surface"]
-        label, bar, _ = self.tab_widgets[key]
-        self.nav_rows[key].configure(bg=bg)
-        label.configure(bg=bg, fg=C["text"] if inside else C["muted"])
-        bar.configure(bg=bg)
+        label, _, badge = self.tab_widgets[key]
+        if not inside:
+            # moving onto the badge inside the row isn't leaving the row
+            try:
+                under = self.root.winfo_containing(*self.root.winfo_pointerxy())
+            except (KeyError, tk.TclError):
+                under = None
+            if under in (label, badge):
+                return
+        state = ["active"] if inside else ["!active"]
+        label.state(state)
+        badge.state(state)
 
     def set_badge(self, key, text, warning=False):
         badge = self.tab_widgets[key][2]
+        text = text.replace("⚠", "").strip()
         if text:
-            badge.configure(text=text, bg=C["amber_soft"] if warning else C["accent_soft"],
-                            fg=C["amber"] if warning else C["accent_text"])
-            badge.pack(side="right", padx=(0, 12))
+            badge.configure(text=text)
+            badge.place(relx=1.0, x=-self.px(14), rely=0.5, anchor="e")
         else:
-            badge.pack_forget()
+            badge.place_forget()
 
     # ----- names and platforms ----------------------------------------------
 
@@ -2495,11 +2956,12 @@ class UserAtlasWindow:
                 on += len(dict.fromkeys(new_extra))
                 self.group_counts[group].set(f"{on} selected")
             else:
-                self.group_counts[group].set(f"{on} / {len(keys)}")
+                self.group_counts[group].set(f"{on} of {len(keys)}")
             total += on
-        self.platform_count.set(f"{total} {'platform' if total == 1 else 'platforms'} selected")
-        self.summary_text.set(f"{n} {'name' if n == 1 else 'names'}   ·   "
-                              f"{total} {'platform' if total == 1 else 'platforms'}")
+        self.platform_count.set(f"{total} selected")
+        plats = f"{total} {'platform' if total == 1 else 'platforms'}"
+        self.summary_text.set(f"{n} {'name' if n == 1 else 'names'} on {plats}" if n
+                              else f"No names yet, {plats} picked")
         if getattr(self, "rules_table", None) is not None:
             if self.rules_after:
                 self.root.after_cancel(self.rules_after)
@@ -2528,7 +2990,7 @@ class UserAtlasWindow:
         rows.sort(key=lambda r: (r[0] == 0, r[0], r[1]))  # names with problems first
         for _, _, name, broken, bad_word in rows:
             if bad_word:
-                first = "blocked word — rejected by most sites"
+                first = "Contains a blocked word"
                 tag = "blocked"
             elif broken:
                 q, why = broken[0]
@@ -2537,10 +2999,11 @@ class UserAtlasWindow:
                     first += f"  (+{len(broken) - 1} more)"
                 tag = "issue"
             else:
-                first = "allowed everywhere"
+                first = "Allowed everywhere"
                 tag = "fits"
             self.rules_table.insert("", "end", iid=name.lower(), tags=(tag,),
-                                    values=(name, f"{len(platforms) - len(broken)} / {len(platforms)}",
+                                    values=("  " + name,
+                                            f"{len(platforms) - len(broken)} of {len(platforms)}",
                                             first))
         with_issues = sum(1 for r in rows if r[3])
         if not names:
@@ -2661,10 +3124,18 @@ class UserAtlasWindow:
 
     def set_busy(self, busy: bool, phase: str = ""):
         self.busy, self.phase = busy, phase
-        self.start_button.configure(state="disabled" if busy else "normal",
-                                    text="Working…" if busy else "Start checking")
+        self.start_button.configure(state="disabled" if busy else "normal")
         self.test_button.configure(state="disabled" if busy else "normal")
         self.stop_button.configure(state="normal" if busy else "disabled")
+        # The sidebar holds one main action: Start, swapped for Stop during a run.
+        if busy:
+            self.start_button.pack_forget()
+            self.stop_button.pack(fill="x")
+            if not self.progress.winfo_ismapped():
+                self.progress.pack(fill="x", pady=(self.px(12), 0))
+        else:
+            self.stop_button.pack_forget()
+            self.start_button.pack(fill="x")
         if busy and phase == "selftest":
             self.progress.configure(mode="indeterminate")
             self.progress.start(12)
@@ -2688,6 +3159,7 @@ class UserAtlasWindow:
         self.stop.set()
         if self.store:
             self.store.close()
+        self.remember_window()
         global _output
         _output = None
         self.root.destroy()
@@ -2758,8 +3230,8 @@ class UserAtlasWindow:
             self.last_status = time.time()
             rest = max((self.remaining.get(q.key, 0) * (q.delay * self.factor + 0.6)
                         for q in self.platforms if q.key not in self.skipped), default=0)
-            self.status.set(f"{self.done_count} of {self.total} checks done   ·   "
-                            f"{duration_text(rest)} to go")
+            self.status.set(f"{self.done_count} of {self.total} checks done, "
+                            f"{duration_text(rest)} to go.")
         self.root.after(100, self.process)
 
     def on_log(self, text):
@@ -2882,13 +3354,16 @@ class UserAtlasWindow:
         self.invalidate_active()
         self.dirty = set()
         self.table.configure(columns=cols, displaycolumns=cols)
-        self.headings = {"name": "NAME", "available": "AVAILABLE", "allowed": "ALLOWED"}
-        self.table.column("name", width=180, minwidth=110, stretch=True, anchor="w")
-        self.table.column("available", width=100, minwidth=80, stretch=True, anchor="center")
-        self.table.column("allowed", width=90, minwidth=74, stretch=True, anchor="center")
+        px = self.px
+        self.headings = {"name": "Name", "available": "Available", "allowed": "Allowed"}
+        self.table.column("name", width=px(200), minwidth=px(120), stretch=True, anchor="w")
+        self.table.column("available", width=px(110), minwidth=px(84), stretch=True,
+                          anchor="center")
+        self.table.column("allowed", width=px(100), minwidth=px(80), stretch=True,
+                          anchor="center")
         for g in self.groups:
-            self.headings[g] = GROUP_TITLES[g].upper()
-            self.table.column(g, width=90, minwidth=74, stretch=True, anchor="center")
+            self.headings[g] = GROUP_TITLES[g]
+            self.table.column(g, width=px(100), minwidth=px(80), stretch=True, anchor="center")
         for col in cols:
             self.table.heading(col, anchor="w" if col == "name" else "center",
                                command=lambda c=col: self.sort_by(c))
@@ -2900,6 +3375,7 @@ class UserAtlasWindow:
             self.empty.place_forget()
         else:
             self.empty.place(relx=0.5, rely=0.42, anchor="center")
+        self.fit_columns()
 
     def update_headings(self):
         col_s, reverse = self.sorting
@@ -2915,7 +3391,7 @@ class UserAtlasWindow:
         st = [self.status_of(name, q) for q in platforms]
         if not any(st):
             return "…" if self.busy else "–"
-        return f"{st.count(AVAILABLE)} / {len(platforms)}" + ("" if all(st) else "  …")
+        return f"{st.count(AVAILABLE)} of {len(platforms)}" + ("" if all(st) else "  …")
 
     def allowed_count(self, name) -> int:
         """Platforms whose rules (and own answer) allow this name."""
@@ -2924,7 +3400,8 @@ class UserAtlasWindow:
 
     def row_values(self, name):
         active = self.active_platforms()
-        return ([name, self.count_text(name, active), f"{self.allowed_count(name)} / {len(active)}"]
+        return (["  " + name, self.count_text(name, active),
+                 f"{self.allowed_count(name)} of {len(active)}"]
                 + [self.count_text(name, self.active_platforms(g)) for g in self.groups])
 
     def row_tags(self, name):
@@ -2941,7 +3418,8 @@ class UserAtlasWindow:
         iid = name.lower()
         if not self.table.exists(iid):
             return
-        self.table.item(iid, values=self.row_values(name), tags=self.row_tags(name))
+        tags = self.row_tags(name) + (("hover",) if iid == self._hover_row else ())
+        self.table.item(iid, values=self.row_values(name), tags=tags)
         if iid in self.hidden and self.visible(name):
             self.table.move(iid, "", "end")
             self.hidden.discard(iid)
@@ -3004,9 +3482,10 @@ class UserAtlasWindow:
     def selection(self, _=None):
         sel = self.table.selection()
         if sel:
-            self.show_detail(self.table.set(sel[0], "name"))
+            self.show_detail(self.table.set(sel[0], "name").strip())
 
     def show_detail(self, name):
+        px = self.px
         # keep the scroll position when the same name is redrawn
         position = 0.0
         canvas = getattr(self, "detail_canvas", None)
@@ -3020,44 +3499,45 @@ class UserAtlasWindow:
             w.destroy()
         self.selected = name
         if not name:
-            ttk.Label(self.detail, text="Pick a name on the left", style="Heading.TLabel").pack(anchor="w")
-            ttk.Label(self.detail, style="Card.Muted.TLabel", wraplength=330, justify="left",
-                      text="You'll see per platform whether it's available. Click a platform "
-                           "to open its page.").pack(anchor="w", pady=(4, 16))
-            ttk.Label(self.detail, text="LEGEND", style="Section.TLabel").pack(anchor="w", pady=(0, 6))
+            ttk.Label(self.detail, text="Pick a name", style="Heading.TLabel").pack(anchor="w")
+            ttk.Label(self.detail, style="Card.Muted.TLabel", wraplength=px(340), justify="left",
+                      text="You'll see on each platform whether it's free. Click a platform "
+                           "to open its page.").pack(anchor="w", pady=(px(6), px(22)))
             grid = ttk.Frame(self.detail, style="Card.TFrame")
-            grid.pack(anchor="w")
-            for i, (kind, text) in enumerate(((AVAILABLE, "available"), (TAKEN, "taken"),
-                                              (INVALID, "not allowed"), (UNKNOWN, "unknown"),
-                                              ("waiting", "checking"), ("skipped", "skipped"))):
-                bg, fg, symbol = CHIP[kind]
-                tk.Label(grid, text=f"{symbol}  {text}", bg=bg, fg=fg,
-                         font=self.f["small_strike" if kind == INVALID else "small"],
-                         padx=10, pady=5, anchor="w").grid(row=i // 3, column=i % 3, sticky="ew",
-                                                          padx=(0, 6), pady=(0, 6))
+            grid.pack(fill="x")
+            for c in range(2):
+                grid.columnconfigure(c, weight=1, uniform="legend")
+            for i, (kind, text) in enumerate(((AVAILABLE, "Available"), (TAKEN, "Taken"),
+                                              (INVALID, "Not allowed"), (UNKNOWN, "Unknown"),
+                                              ("waiting", "Checking"), ("skipped", "Skipped"))):
+                ttk.Label(grid, text=f"{CHIP[kind][2]}  {text}", style=self.pill_styles[kind]).grid(
+                    row=i // 2, column=i % 2, sticky="ew", padx=(0, px(8)), pady=(0, px(8)))
             return
 
         head = ttk.Frame(self.detail, style="Card.TFrame")
         head.pack(fill="x")
-        ttk.Label(head, text=name, style="Big.TLabel").pack(side="left")
+        ttk.Label(head, text=name, style="Big.TLabel", wraplength=px(290)).pack(side="left")
         ttk.Button(head, text="Copy", style="Link.TButton",
-                   command=lambda: self.copy(name)).pack(side="right")
+                   command=lambda: self.copy(name)).pack(side="right", anchor="n", pady=(px(8), 0))
         active = self.active_platforms()
         waiting = sum(1 for q in active if not self.status_of(name, q))
-        sub = f"Available on {self.available_count(name)} of {len(active)} platforms"
+        ttk.Label(self.detail, text=f"Available on {self.available_count(name)} of "
+                                    f"{len(active)} platforms",
+                  style="Card.Muted.TLabel").pack(anchor="w", pady=(px(2), 0))
         if waiting and self.busy:
-            sub += f"   ·   {waiting} still checking"
-        ttk.Label(self.detail, text=sub, style="Card.Muted.TLabel").pack(anchor="w", pady=(2, 4))
+            ttk.Label(self.detail, text=f"{waiting} still checking",
+                      style="Card.Muted.TLabel").pack(anchor="w")
 
         # The hint sits at the bottom and is placed first, so it's always visible.
-        default = "Hover a platform for details, click it to open its page."
+        default = "Hover a platform for details; click one to open its page."
         self.hint = tk.StringVar(value=default)
         ttk.Label(self.detail, textvariable=self.hint, style="Card.Muted.TLabel",
-                  wraplength=340, justify="left").pack(side="bottom", anchor="w", pady=(10, 0))
+                  wraplength=px(350), justify="left").pack(side="bottom", anchor="w",
+                                                           pady=(px(12), 0))
 
         # The platforms sit in a scrollable area, for small windows or many extensions.
         holder = ttk.Frame(self.detail, style="Card.TFrame")
-        holder.pack(fill="both", expand=True)
+        holder.pack(fill="both", expand=True, pady=(px(6), 0))
         canvas = tk.Canvas(holder, bg=C["card"], highlightthickness=0, borderwidth=0)
         scroll = ttk.Scrollbar(holder, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=scroll.set)
@@ -3074,46 +3554,64 @@ class UserAtlasWindow:
                 scroll.pack_forget()
 
         inner.bind("<Configure>", arrange)
-        canvas.bind("<Configure>", lambda e: (canvas.itemconfigure(window_id, width=e.width), arrange()))
+        canvas.bind("<Configure>", lambda e: (canvas.itemconfigure(window_id, width=e.width),
+                                              arrange()))
         for button in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             canvas.bind(button, self.wheel)
         if position:
             self.root.after_idle(lambda: canvas.yview_moveto(position))
 
+        per_row = self._pill_cols = self.pill_columns()
         for group in GROUPS:
             ps = [q for q in self.platforms if q.group == group]
             if not ps:
                 continue
-            ttk.Label(inner, text=GROUP_TITLES[group].upper(),
-                      style="Section.TLabel").pack(anchor="w", pady=(10, 5))
+            ttk.Label(inner, text=GROUP_TITLES[group],
+                      style="Section.TLabel").pack(anchor="w", pady=(px(16), px(8)))
             grid = ttk.Frame(inner, style="Card.TFrame")
             grid.pack(fill="x")
-            for c in range(3):
+            for c in range(per_row):
                 grid.columnconfigure(c, weight=1, uniform="chip")
             for i, q in enumerate(ps):
-                self.chip(grid, name, q, default).grid(row=i // 3, column=i % 3, sticky="ew",
-                                                       padx=(0, 5), pady=(0, 5))
+                self.chip(grid, name, q, default).grid(row=i // per_row, column=i % per_row,
+                                                       sticky="ew", padx=(0, px(6)),
+                                                       pady=(0, px(6)))
+
+    def pill_columns(self) -> int:
+        """Three platform pills per row, or two when the panel is narrow."""
+        width = self.detail.winfo_width()
+        return 3 if width <= 1 or width >= self.px(340) else 2
+
+    def refit_pills(self):
+        if self.selected and self.pill_columns() != self._pill_cols:
+            self.show_detail(self.selected)
 
     def chip(self, parent, name, q, default):
         status, detail = self.results.get((name.lower(), q.key), ("", ""))
-        if not status and q.problem(name):
+        if not status and self.problem_for(name, q):
             status, detail = INVALID, q.problem(name)
         kind = status or ("skipped" if q.key in self.skipped
                           else "waiting" if self.busy else "")
-        bg, fg, symbol = CHIP.get(kind, CHIP[""])
-        label = tk.Label(parent, text=f"{symbol}  {q.short_title}", bg=bg, fg=fg,
-                         font=self.f["small_strike" if kind == INVALID else "small"],
-                         anchor="w", padx=10, pady=5,
-                         cursor="hand2" if q.link else "")
+        label = ttk.Label(parent, text=f"{CHIP.get(kind, CHIP[''])[2]}  {q.short_title}",
+                          style=self.pill_styles.get(kind, self.pill_styles[""]),
+                          cursor="hand2" if q.link else "")
         if kind == INVALID and detail:
-            hint = f"{q.title} doesn't allow this name: {detail}"
+            hint = f"{q.title} doesn't allow this name: {detail}."
         else:
-            hint = f"{q.title}: {CHIP_TEXT.get(kind, kind)}" + (f" – {detail}" if detail else "")
+            hint = f"{q.title}: {CHIP_TEXT.get(kind, kind)}" + (f" ({detail})" if detail else "") + "."
         if q.link:
-            hint += "   ·   click to open"
+            hint += " Click to open its page."
             label.bind("<Button-1>", lambda e: webbrowser.open(q.link_for(name)))
-        label.bind("<Enter>", lambda e: self.hint.set(hint))
-        label.bind("<Leave>", lambda e: self.hint.set(default))
+
+        def enter(_):
+            label.state(["active"])
+            self.hint.set(hint)
+
+        def leave(_):
+            label.state(["!active"])
+            self.hint.set(default)
+        label.bind("<Enter>", enter)
+        label.bind("<Leave>", leave)
         for button in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             label.bind(button, self.wheel)
         return label
@@ -3182,7 +3680,7 @@ class UserAtlasWindow:
             self.update_status.set(f"Version {info['version']} is on GitHub.")
             self.update_text.configure(text=f"New version {info['version']}")
             self.update_button.configure(text="View")
-        self.update_pill.pack(fill="x", pady=(0, 10), before=self.start_button)
+        self.update_pill.pack(fill="x", pady=(0, self.px(12)), before=self.action_slot)
         self.log("A new version is available.")
 
     def click_update(self):
@@ -3212,7 +3710,7 @@ class UserAtlasWindow:
             if busy:
                 self.selftest_state[q.key] = ("busy", "")
             self.test_table.insert("", "end", iid=q.key, values=(
-                q.title, GROUP_TITLES[q.group], "", ""))
+                "  " + q.title, GROUP_TITLES[q.group], "", ""))
             self.update_test_row(q.key)
         failing = sum(1 for st, _ in self.selftest_state.values() if st == "not working")
         self.set_badge("selftest", f"⚠ {failing}" if failing else "", warning=True)
@@ -3229,20 +3727,21 @@ class UserAtlasWindow:
 
     def export(self):
         if not self.names:
-            messagebox.showinfo("UserAtlas", "There's nothing to save yet.")
+            messagebox.showinfo("UserAtlas", "There's nothing to export yet. Check some "
+                                             "names first.")
             return
         path = filedialog.asksaveasfilename(
-            title="Save overview", defaultextension=".csv", initialfile="overview.csv",
+            title="Export CSV", defaultextension=".csv", initialfile="overview.csv",
             filetypes=[("CSV (opens in Excel)", "*.csv")])
         if not path:
             return
         try:
             write_overview(path, self.names, self.platforms, self.results)
         except OSError as e:
-            messagebox.showerror("UserAtlas", f"Saving failed:\n{e}")
+            messagebox.showerror("UserAtlas", f"Exporting failed:\n{e}")
             return
-        self.log(f"Overview saved: {path}")
-        self.status.set("Overview saved.")
+        self.log(f"CSV exported: {path}")
+        self.status.set("CSV exported.")
 
     def open_folder(self):
         try:
@@ -3258,12 +3757,9 @@ class UserAtlasWindow:
     # ----- proxy ------------------------------------------------------------
 
     def load_settings(self):
-        text = ""
-        try:
-            with open(self.settings_path, encoding="utf-8") as f:
-                data = json.load(f)
-            text = data.get("proxies") or data.get("proxy") or ""
-        except (OSError, ValueError):
+        data = self.read_settings()
+        text = data.get("proxies") or data.get("proxy") or ""
+        if not isinstance(text, str):
             text = ""
         apply_proxy_text(text)
         if getattr(self, "proxy_box", None) is not None:
@@ -3303,7 +3799,7 @@ class UserAtlasWindow:
             return pre + "Using your normal connection."
         bits = []
         if n:
-            rot = " — checks rotate through them" if n > 1 else ""
+            rot = " (checks rotate through them)" if n > 1 else ""
             bits.append(f"{n} {'proxy' if n == 1 else 'proxies'} active{rot}")
         if invalid:
             ex = ", ".join(shorten(x, 24) for x in invalid[:3])
@@ -3314,11 +3810,9 @@ class UserAtlasWindow:
     def save_proxy(self):
         text = self.proxy_text().strip()
         valid, invalid = apply_proxy_text(text)
-        try:
-            with open(self.settings_path, "w", encoding="utf-8") as f:
-                json.dump({"proxies": text}, f)
-        except OSError as e:
-            self.proxy_status.set(f"Couldn't save the setting: {e}")
+        error = self.write_settings(proxies=text)
+        if error:
+            self.proxy_status.set(f"Couldn't save the setting: {error}")
             return
         self.proxy_status.set(self.proxy_summary(valid, invalid, saved=True))
 
