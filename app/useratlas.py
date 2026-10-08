@@ -85,7 +85,7 @@ FINAL = {AVAILABLE, LIKELY, TAKEN, INVALID}
 FREE = {AVAILABLE, LIKELY}
 # Bump when checks change in a way that makes earlier 'available' results
 # untrustworthy; those are then checked again instead of reused.
-CHECKS_VERSION = "2"
+CHECKS_VERSION = "3"
 TIMEOUT = 15
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
@@ -466,13 +466,18 @@ def check_x(s, n):
     d = json_or_none(r)
     if isinstance(d, dict) and "valid" in d:
         if d["valid"] is True:
-            return AVAILABLE, ""
+            # This public check misses names held by suspended or deactivated
+            # accounts, which X's sign-up screen still refuses.
+            return LIKELY, "X's public check says free; its sign-up screen can still refuse it"
         reason = d.get("reason", "")
         if reason == "taken":
             return TAKEN, ""
         if "unavailable" in f"{d.get('msg', '')} {d.get('desc', '')}".lower():
             return TAKEN, "X keeps this name unavailable"
         return INVALID, shorten(d.get("desc") or reason or "X says this name isn't allowed")
+    if isinstance(d, dict) and d.get("errors"):
+        # X answers 'internal error' for some names its sign-up screen calls taken
+        return UNKNOWN, "X wouldn't say (often a name held by a suspended account)"
     return unexpected(r)
 
 
@@ -3109,7 +3114,7 @@ class UserAtlasWindow:
                                "official registry. ‘Probably free’ (○) means no account was "
                                "found, but the site has no public way to confirm it: banned, "
                                "deleted or private accounts can still hold such a name "
-                               "(TikTok, YouTube, Snapchat and SoundCloud work this way). "
+                               "(TikTok, YouTube, Snapchat, SoundCloud and X work this way). "
                                "Click a platform on the Results page to go straight to its "
                                "page.")).pack(anchor="w")
 
