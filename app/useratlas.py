@@ -464,16 +464,124 @@ def check_x(s, n):
 
 
 def check_youtube(s, n):
-    r = s.get(f"https://www.youtube.com/@{n}",
-              cookies={"SOCS": "CAI", "CONSENT": "YES+cb"}, timeout=TIMEOUT)
+    consent = {"SOCS": "CAI", "CONSENT": "YES+cb"}
+    r = s.get(f"https://www.youtube.com/@{n}", cookies=consent, timeout=TIMEOUT)
     if "consent." in r.url:
         return UNKNOWN, "YouTube's cookie notice is in the way"
-    return by_status(r, available_detail="no channel found")
+    if r.status_code != 404:
+        return by_status(r)
+    # No channel uses this @handle, but YouTube also keeps a handle for every
+    # channel whose old custom URL (/c/name) or username (/user/name) it is.
+    for path in (f"c/{n}", f"user/{n}"):
+        r = s.get(f"https://www.youtube.com/{path}", cookies=consent, timeout=TIMEOUT)
+        if r.status_code == 200:
+            return TAKEN, f"reserved by a channel's old URL (youtube.com/{path})"
+        if r.status_code not in (404, 410):
+            return unexpected(r)
+    return AVAILABLE, "no channel found"
+
+
+SNAP_XSRF = re.compile(r"xsrf_token=([\w-]+)")
+
+
+def snapchat_signup_check(s, n) -> Optional[Result]:
+    """Ask the check Snapchat's own sign-up form does; None if it gives no clear answer."""
+    r = s.get("https://accounts.snapchat.com/accounts/login", timeout=TIMEOUT)
+    token = s.cookies.get("xsrf_token")
+    if not token:
+        m = SNAP_XSRF.search(r.headers.get("Set-Cookie", ""))
+        token = m.group(1) if m else ""
+    if not token:
+        return None
+    r = s.post("https://accounts.snapchat.com/accounts/get_username_suggestions",
+               data={"requested_username": n, "xsrf_token": token},
+               cookies={"xsrf_token": token}, timeout=TIMEOUT)
+    if r.status_code == 429:
+        raise RateLimited(retry_after(r))
+    d = json_or_none(r)
+    value = d.get("value") if isinstance(d, dict) else None
+    if not isinstance(value, dict):
+        return None
+    code = str(value.get("status_code", "")).upper()
+    message = str(value.get("error_message") or "")
+    if code == "OK" and not message:
+        return AVAILABLE, ""
+    if code in ("TAKEN", "DELETED") or re.search(r"taken|unavailable", message, re.I):
+        return TAKEN, "" if code != "DELETED" else "used by a deleted account"
+    if code.startswith(("INVALID", "TOO_")) and message:
+        return INVALID, shorten(message)
+    return None
 
 
 def check_snapchat(s, n):
+    try:
+        found = snapchat_signup_check(s, n)
+    except requests.RequestException:
+        found = None
+    if found:
+        return found
+    # Fallback: is there a public profile? (Misses deleted and some private accounts.)
     r = s.get(f"https://www.snapchat.com/add/{n}", timeout=TIMEOUT)
     return by_status(r, available_detail=NO_PROFILE)
+
+
+# Fragment (fragment.com) sells Telegram's "collectible" usernames. Those have no
+# t.me profile while unused, yet can't be claimed for free: Telegram then says
+# "taken, but available for purchase" or simply "invalid".
+FRAGMENT_HEADER_STATUS = re.compile(
+    r'class="([^"]*\btm-section-header-status\b[^"]*)"[^>]*>\s*([^<]*?)\s*<')
+
+
+def fragment_listing(s, n) -> Optional[str]:
+    """Fragment's status for this name ('Available', 'On auction', 'Sold', …),
+    '' when Fragment doesn't sell it, or None when Fragment couldn't be asked."""
+    name = n.lower()
+    try:
+        r = s.get(f"https://fragment.com/username/{name}",
+                  headers={"X-Requested-With": "XMLHttpRequest",
+                           "X-Aj-Referer": f"https://fragment.com/?query={name}",
+                           "Accept": "application/json, text/javascript, */*; q=0.01"},
+                  allow_redirects=False, timeout=TIMEOUT)
+    except requests.RequestException:
+        return None
+    if r.status_code in (301, 302, 303, 307, 308):
+        # sent elsewhere (the search page): there's no page for this name
+        return "" if "/username/" not in r.headers.get("Location", "") else None
+    if r.status_code != 200:
+        return None
+    d = json_or_none(r)
+    if isinstance(d, dict):
+        html = d.get("h")
+        if not html:
+            return ""  # the page answered with a redirect: not a Fragment name
+    else:
+        html = r.text
+    m = FRAGMENT_HEADER_STATUS.search(html or "")
+    if not m:
+        # A real Fragment page without a name header (the search page) means it
+        # isn't sold there; anything else (a bot check, an error) tells us nothing.
+        return "" if "tm-" in (html or "") else None
+    css = re.search(r"tm-status-(\w+)", m.group(1))
+    css, text = (css.group(1).lower() if css else ""), " ".join(m.group(2).split())
+    if text.lower() == "unavailable":
+        return ""  # Fragment doesn't sell it; Telegram decides
+    if text:
+        return text
+    return {"avail": "Available", "unavail": "Sold", "taken": "Taken"}.get(css)
+
+
+def ton_collectible(s, n) -> Optional[bool]:
+    """Is this name a minted collectible (an NFT on the TON blockchain)? None if unknown."""
+    try:
+        r = s.get(f"https://tonapi.io/v2/dns/{n.lower()}.t.me", timeout=TIMEOUT)
+    except requests.RequestException:
+        return None
+    if r.status_code == 404:
+        return False
+    d = json_or_none(r)
+    if r.status_code == 200 and isinstance(d, dict):
+        return bool(d.get("item") or d.get("name"))
+    return None
 
 
 def check_telegram(s, n):
@@ -482,9 +590,22 @@ def check_telegram(s, n):
         raise RateLimited(retry_after(r))
     if "tgme_page_title" in r.text:
         return TAKEN, ""
-    if r.status_code == 200 and "tgme_page" in r.text:
-        return AVAILABLE, NO_PROFILE
-    return unexpected(r)
+    if not (r.status_code == 200 and "tgme_page" in r.text):
+        return unexpected(r)
+    # Nobody uses it. Make sure it isn't a collectible that's sold separately.
+    if ton_collectible(s, n):
+        return TAKEN, "a collectible username someone owns (Fragment)"
+    listed = fragment_listing(s, n)
+    if listed:
+        why = {"available": "only sold through Fragment",
+               "on auction": "on auction on Fragment",
+               "for sale": "for sale on Fragment",
+               "sold": "sold as a collectible on Fragment"}.get(listed.lower(),
+                                                                f"Fragment: {listed.lower()}")
+        return TAKEN, f"collectible username, {why}"
+    if listed is None:
+        return UNKNOWN, "no profile, but Fragment (collectible names) couldn't be checked"
+    return AVAILABLE, NO_PROFILE
 
 
 def check_bluesky(s, n):
@@ -528,7 +649,75 @@ def check_gitlab(s, n):
     return unexpected(r)
 
 
+# Reddit blocks anonymous checks from apps; its official API works with keys the
+# user creates at reddit.com/prefs/apps (a "script" app). Optional; kept locally.
+REDDIT_APPS_URL = "https://www.reddit.com/prefs/apps"
+_reddit = {"id": os.environ.get("REDDIT_CLIENT_ID", ""),
+           "secret": os.environ.get("REDDIT_CLIENT_SECRET", ""),
+           "token": "", "expires": 0.0}
+_reddit_lock = threading.Lock()
+
+
+def set_reddit_keys(client_id: str, secret: str) -> None:
+    with _reddit_lock:
+        _reddit.update(id=(client_id or "").strip(), secret=(secret or "").strip(),
+                       token="", expires=0.0)
+
+
+def reddit_keys_set() -> bool:
+    return bool(_reddit["id"] and _reddit["secret"])
+
+
+def reddit_token(s, fresh: bool = False) -> str:
+    """An app-only access token for Reddit's API; raises RuntimeError when refused."""
+    with _reddit_lock:
+        if _reddit["token"] and not fresh and time.time() < _reddit["expires"]:
+            return _reddit["token"]
+        r = s.post("https://www.reddit.com/api/v1/access_token",
+                   auth=(_reddit["id"], _reddit["secret"]),
+                   data={"grant_type": "client_credentials"},
+                   headers={"User-Agent": f"windows:useratlas:{VERSION} (username checker)"},
+                   timeout=TIMEOUT)
+        if r.status_code == 429:
+            raise RateLimited(retry_after(r))
+        d = json_or_none(r)
+        token = d.get("access_token") if isinstance(d, dict) else None
+        if not token:
+            why = (d or {}).get("error") if isinstance(d, dict) else f"HTTP {r.status_code}"
+            raise RuntimeError(f"Reddit didn't accept the API keys ({why})")
+        _reddit["token"] = token
+        _reddit["expires"] = time.time() + float(d.get("expires_in") or 3600) - 60
+        return token
+
+
+def check_reddit_api(s, n):
+    h = {"User-Agent": f"windows:useratlas:{VERSION} (username checker)"}
+    try:
+        for attempt in range(2):
+            h["Authorization"] = f"bearer {reddit_token(s, fresh=attempt > 0)}"
+            r = s.get("https://oauth.reddit.com/api/username_available",
+                      params={"user": n}, headers=h, timeout=TIMEOUT)
+            if r.status_code != 401:
+                break
+    except RuntimeError as e:
+        return UNKNOWN, str(e)
+    if r.status_code == 429:
+        raise RateLimited(retry_after(r))
+    d = json_or_none(r)
+    if r.status_code == 200 and d is True:
+        return AVAILABLE, ""
+    if r.status_code == 200 and d is False:
+        return TAKEN, ""
+    if r.status_code == 403:
+        return UNKNOWN, "Reddit refused the API keys (is API access approved yet?)"
+    # Fallback: does the profile exist?
+    r = s.get(f"https://oauth.reddit.com/user/{n}/about", headers=h, timeout=TIMEOUT)
+    return by_status(r, available_detail="no profile found (deleted names can't be claimed again)")
+
+
 def check_reddit(s, n):
+    if reddit_keys_set():
+        return check_reddit_api(s, n)
     r = s.get("https://www.reddit.com/api/username_available.json",
               params={"user": n}, timeout=TIMEOUT)
     if r.status_code == 429:
@@ -541,6 +730,8 @@ def check_reddit(s, n):
             return TAKEN, ""
     # Fallback: does the profile exist?
     r = s.get(f"https://www.reddit.com/user/{n}/about.json", timeout=TIMEOUT)
+    if r.status_code in (401, 403):
+        return UNKNOWN, "Reddit blocks checks without API keys (add them in Settings)"
     return by_status(r, available_detail="no profile found (deleted names can't be claimed again)")
 
 
@@ -2814,6 +3005,31 @@ class UserAtlasWindow:
         flow(1, ttk.Label(box, textvariable=self.proxy_status, style="Page.TLabel",
                           wraplength=wrap, justify="left")).pack(anchor="w", pady=(px(8), 0))
 
+        box = section(1, "Reddit API keys",
+                      "Reddit only answers apps that use its official API. Create a "
+                      "'script' app on Reddit's app page and paste its ID (under the app "
+                      "name) and secret here. Reddit may first ask you to request API "
+                      "access. Without keys, Reddit is skipped.")
+        self.reddit_id = tk.StringVar(value=_reddit["id"])
+        self.reddit_secret = tk.StringVar(value=_reddit["secret"])
+        for title, var, show in (("App ID", self.reddit_id, ""),
+                                 ("Secret", self.reddit_secret, "•")):
+            row = ttk.Frame(box)
+            row.pack(fill="x", pady=(0, px(8)))
+            ttk.Label(row, text=title, width=8).pack(side="left")
+            ttk.Entry(row, textvariable=var, show=show, style="Page.TEntry").pack(
+                side="left", fill="x", expand=True)
+        row = ttk.Frame(box)
+        row.pack(fill="x", pady=(px(2), 0))
+        ttk.Button(row, text="Save keys", style="Page.TButton",
+                   command=self.save_reddit_keys).pack(side="left")
+        ttk.Button(row, text="Open Reddit's app page", style="Page.Link.TButton",
+                   command=lambda: webbrowser.open(REDDIT_APPS_URL)).pack(
+            side="left", padx=(px(16), 0))
+        self.reddit_status = tk.StringVar(value="")
+        flow(1, ttk.Label(box, textvariable=self.reddit_status, style="Page.TLabel",
+                          wraplength=wrap, justify="left")).pack(anchor="w", pady=(px(8), 0))
+
         box = section(1, "Version")
         ttk.Label(box, text=f"UserAtlas {VERSION}", style="Strong.TLabel").pack(anchor="w")
         if LAUNCHER:
@@ -3599,6 +3815,8 @@ class UserAtlasWindow:
             hint = f"{q.title} doesn't allow this name: {detail}."
         else:
             hint = f"{q.title}: {CHIP_TEXT.get(kind, kind)}" + (f" ({detail})" if detail else "") + "."
+        if q.key == "reddit" and kind == "skipped" and not reddit_keys_set():
+            hint += " Reddit needs API keys: add them in Settings."
         if q.link:
             hint += " Click to open its page."
             label.bind("<Button-1>", lambda e: webbrowser.open(q.link_for(name)))
@@ -3762,6 +3980,14 @@ class UserAtlasWindow:
         if not isinstance(text, str):
             text = ""
         apply_proxy_text(text)
+        keys = data.get("reddit") if isinstance(data.get("reddit"), dict) else {}
+        if keys.get("id") and keys.get("secret"):
+            set_reddit_keys(str(keys["id"]), str(keys["secret"]))
+        if getattr(self, "reddit_id", None) is not None:
+            self.reddit_id.set(_reddit["id"])
+            self.reddit_secret.set(_reddit["secret"])
+            self.reddit_status.set("Keys saved; Reddit is checked through its API."
+                                   if reddit_keys_set() else "")
         if getattr(self, "proxy_box", None) is not None:
             self._proxy_hide_ph()
             self.proxy_box.delete("1.0", "end")
@@ -3807,6 +4033,34 @@ class UserAtlasWindow:
             bits.append(f"{len(invalid)} line(s) skipped (bad format): {ex}{more}")
         return pre + "; ".join(bits) + "."
 
+    def save_reddit_keys(self):
+        client_id, secret = self.reddit_id.get().strip(), self.reddit_secret.get().strip()
+        if bool(client_id) != bool(secret):
+            self.reddit_status.set("Fill in both the app ID and the secret.")
+            return
+        set_reddit_keys(client_id, secret)
+        error = self.write_settings(reddit={"id": client_id, "secret": secret})
+        if error:
+            self.reddit_status.set(f"Couldn't save the keys: {error}")
+            return
+        if not client_id:
+            self.reddit_status.set("Keys removed. Reddit is skipped.")
+            return
+        self.reddit_status.set("Saved. Testing the keys…")
+
+        def run():
+            s = new_session()
+            try:
+                status, detail = check_reddit_api(s, "spez")
+            except Exception as e:  # network trouble, rate limit
+                status, detail = UNKNOWN, shorten(e)
+            msg = ("Saved. The keys work; Reddit is checked through its API."
+                   if status == TAKEN else f"Saved, but the test failed: {detail or status}.")
+            self.events.put(("reddit_result", msg))
+            self.events.put(("log", f"Reddit API keys: {msg}"))
+
+        threading.Thread(target=run, daemon=True).start()
+
     def save_proxy(self):
         text = self.proxy_text().strip()
         valid, invalid = apply_proxy_text(text)
@@ -3847,6 +4101,9 @@ class UserAtlasWindow:
 
     def on_proxy_result(self, msg):
         self.proxy_status.set(msg)
+
+    def on_reddit_result(self, msg):
+        self.reddit_status.set(msg)
 
     def log(self, text):
         self.log_box.configure(state="normal")
