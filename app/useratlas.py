@@ -440,7 +440,9 @@ def check_tiktok(s, n):
             code = info.get("statusCode")
             user = ((info.get("userInfo") or {}).get("user") or {})
             if code == 10221:
-                return AVAILABLE, NO_PROFILE
+                # TikTok keeps the names of banned and deleted accounts, which
+                # look exactly like this; only its edit-profile screen knows.
+                return AVAILABLE, "no profile found (banned or deleted accounts can still hold it)"
             if code in (0, 10222) or user.get("uniqueId"):
                 return TAKEN, ""
             return UNKNOWN, f"unknown TikTok code {code}"
@@ -525,49 +527,70 @@ def check_snapchat(s, n):
     return by_status(r, available_detail=NO_PROFILE)
 
 
-# Fragment (fragment.com) sells Telegram's "collectible" usernames. Those have no
-# t.me profile while unused, yet can't be claimed for free: Telegram then says
-# "taken, but available for purchase" or simply "invalid".
-FRAGMENT_HEADER_STATUS = re.compile(
-    r'class="([^"]*\btm-section-header-status\b[^"]*)"[^>]*>\s*([^<]*?)\s*<')
+# t.me alone can't tell a free name from one in use: accounts without a public
+# page (and unused collectibles) show the same "you can contact @name" page as a
+# free name. Fragment (fragment.com, Telegram's official username marketplace)
+# reports a status for every name: "Unavailable" means nobody has it and it isn't
+# sold, so it can be claimed; "Taken" means an account uses it; "Available",
+# "On auction", "For sale" and "Sold" mean it's a collectible that must be bought.
+FRAGMENT_STATUS = re.compile(
+    r'class="([^"]*\btm-status-(\w+)\b[^"]*)"[^>]*>\s*([^<]*?)\s*<')
+FRAGMENT_ROW = re.compile(r'<tr[^>]*tm-row-selectable[^>]*>(.*?)</tr>', re.S)
+FRAGMENT_CSS = {"avail": "available", "unavail": "unavailable", "taken": "taken"}
 
 
-def fragment_listing(s, n) -> Optional[str]:
-    """Fragment's status for this name ('Available', 'On auction', 'Sold', …),
-    '' when Fragment doesn't sell it, or None when Fragment couldn't be asked."""
+def _fragment_html(r) -> Optional[str]:
+    if r.status_code == 429:
+        raise RateLimited(retry_after(r))
+    if r.status_code != 200:
+        return None
+    d = json_or_none(r)
+    if isinstance(d, dict):
+        return d.get("h") or ""
+    return r.text
+
+
+def _fragment_status(css_class: str, css: str, text: str) -> str:
+    text = " ".join(text.split()).lower()
+    return text or FRAGMENT_CSS.get(css.lower(), css.lower())
+
+
+def fragment_status(s, n) -> Optional[str]:
+    """Fragment's status for this name, lowercased ('unavailable', 'taken',
+    'available', 'on auction', 'for sale', 'sold'), or None when Fragment
+    couldn't be read."""
     name = n.lower()
+    # 1) The name's own page, whose header shows its status.
     try:
         r = s.get(f"https://fragment.com/username/{name}",
                   headers={"X-Requested-With": "XMLHttpRequest",
                            "X-Aj-Referer": f"https://fragment.com/?query={name}",
                            "Accept": "application/json, text/javascript, */*; q=0.01"},
                   allow_redirects=False, timeout=TIMEOUT)
+        html = None if r.status_code in (301, 302, 303, 307, 308) else _fragment_html(r)
+    except requests.RequestException:
+        html = None
+    if html:
+        for m in FRAGMENT_STATUS.finditer(html):
+            if "tm-section-header-status" in m.group(1):
+                return _fragment_status(*m.groups())
+    # 2) The search page: one row per name, with that name's status.
+    try:
+        r = s.get("https://fragment.com/", params={"query": name}, timeout=TIMEOUT)
+        html = _fragment_html(r)
     except requests.RequestException:
         return None
-    if r.status_code in (301, 302, 303, 307, 308):
-        # sent elsewhere (the search page): there's no page for this name
-        return "" if "/username/" not in r.headers.get("Location", "") else None
-    if r.status_code != 200:
+    if html is None:
         return None
-    d = json_or_none(r)
-    if isinstance(d, dict):
-        html = d.get("h")
-        if not html:
-            return ""  # the page answered with a redirect: not a Fragment name
-    else:
-        html = r.text
-    m = FRAGMENT_HEADER_STATUS.search(html or "")
-    if not m:
-        # A real Fragment page without a name header (the search page) means it
-        # isn't sold there; anything else (a bot check, an error) tells us nothing.
-        return "" if "tm-" in (html or "") else None
-    css = re.search(r"tm-status-(\w+)", m.group(1))
-    css, text = (css.group(1).lower() if css else ""), " ".join(m.group(2).split())
-    if text.lower() == "unavailable":
-        return ""  # Fragment doesn't sell it; Telegram decides
-    if text:
-        return text
-    return {"avail": "Available", "unavail": "Sold", "taken": "Taken"}.get(css)
+    rows = FRAGMENT_ROW.findall(html)
+    for row in rows:
+        names = re.findall(r'/username/([A-Za-z0-9_]+)|>\s*@([A-Za-z0-9_]+)\s*<', row)
+        if any(name == (a or b).lower() for a, b in names):
+            m = FRAGMENT_STATUS.search(row)
+            return _fragment_status(*m.groups()) if m else None
+    # Fragment's search always lists the exact name it was asked about, so a
+    # page without it is one we can't read (changed layout, bot check).
+    return None
 
 
 def ton_collectible(s, n) -> Optional[bool]:
@@ -584,6 +607,13 @@ def ton_collectible(s, n) -> Optional[bool]:
     return None
 
 
+FRAGMENT_TAKEN = {"taken": "used by an account without a public page",
+                  "available": "collectible username, only sold through Fragment",
+                  "on auction": "collectible username, on auction on Fragment",
+                  "for sale": "collectible username, for sale on Fragment",
+                  "sold": "collectible username, owned by someone"}
+
+
 def check_telegram(s, n):
     r = s.get(f"https://t.me/{n}", timeout=TIMEOUT)
     if r.status_code == 429:
@@ -592,20 +622,15 @@ def check_telegram(s, n):
         return TAKEN, ""
     if not (r.status_code == 200 and "tgme_page" in r.text):
         return unexpected(r)
-    # Nobody uses it. Make sure it isn't a collectible that's sold separately.
+    # No public page. That doesn't mean free: ask Fragment.
+    status = fragment_status(s, n)
+    if status == "unavailable":
+        return AVAILABLE, "nobody has it (checked on Fragment)"
+    if status:
+        return TAKEN, FRAGMENT_TAKEN.get(status, f"Fragment says: {status}")
     if ton_collectible(s, n):
-        return TAKEN, "a collectible username someone owns (Fragment)"
-    listed = fragment_listing(s, n)
-    if listed:
-        why = {"available": "only sold through Fragment",
-               "on auction": "on auction on Fragment",
-               "for sale": "for sale on Fragment",
-               "sold": "sold as a collectible on Fragment"}.get(listed.lower(),
-                                                                f"Fragment: {listed.lower()}")
-        return TAKEN, f"collectible username, {why}"
-    if listed is None:
-        return UNKNOWN, "no profile, but Fragment (collectible names) couldn't be checked"
-    return AVAILABLE, NO_PROFILE
+        return TAKEN, FRAGMENT_TAKEN["sold"]
+    return UNKNOWN, "no public page, and Fragment couldn't be checked to confirm"
 
 
 def check_bluesky(s, n):
